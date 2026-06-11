@@ -63,17 +63,6 @@ impl PageTextFn for DefaultPageText {
     }
 }
 
-/// Public entry point: process a single PDF file through the 5-step pipeline.
-pub async fn process_file(
-    input: &Path,
-    cli: &Cli,
-    config: &Config,
-    client: &reqwest::Client,
-) -> Result<Option<ProcessResult>> {
-    let pdfium = OnceLock::new();
-    process_file_inner(input, cli, config, client, &DefaultPageText, &pdfium).await
-}
-
 /// Testable inner implementation with injectable page_text trait and base URLs from config.
 pub(crate) async fn process_file_inner(
     input: &Path,
@@ -189,19 +178,19 @@ pub(crate) async fn process_batch_inner(
     results
 }
 
-/// If `vault/{title}.md` or `papers/{title}.pdf` already exists, append a
-/// numeric suffix (`-2`, `-3`, ...) until both slots are free. Returns the
-/// (possibly suffixed) title.
+/// If `vault/{title}.md`, `papers/{title}.pdf`, or `vault/assets/images/{title}/`
+/// already exists, append a numeric suffix (`-2`, `-3`, ...) until all three
+/// slots are free. Returns the (possibly suffixed) title.
 fn deduplicate_title(title: &str, vault: &Path, papers: &Path) -> String {
-    let (md, pdf, _) = output_paths(title, vault, papers);
-    if !md.exists() && !pdf.exists() {
+    let (md, pdf, images) = output_paths(title, vault, papers);
+    if !md.exists() && !pdf.exists() && !images.exists() {
         return title.to_string();
     }
     let mut n = 2u32;
     loop {
         let candidate = format!("{title}-{n}");
-        let (md, pdf, _) = output_paths(&candidate, vault, papers);
-        if !md.exists() && !pdf.exists() {
+        let (md, pdf, images) = output_paths(&candidate, vault, papers);
+        if !md.exists() && !pdf.exists() && !images.exists() {
             return candidate;
         }
         n += 1;
@@ -899,5 +888,46 @@ mod tests {
             img,
             PathBuf::from("/vault/assets/images/attention-is-all-you-need")
         );
+    }
+
+    #[test]
+    fn test_deduplicate_title_images_dir_collision() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path().join("vault");
+        let papers = dir.path().join("papers");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+
+        // Pre-create ONLY the images directory (no .md, no .pdf).
+        let images_dir = vault.join("assets").join("images").join("my-paper");
+        std::fs::create_dir_all(&images_dir).unwrap();
+        // Place a sentinel file to verify the stale dir is untouched later.
+        let sentinel = images_dir.join("stale-image.png");
+        std::fs::write(&sentinel, b"stale").unwrap();
+
+        let result = deduplicate_title("my-paper", &vault, &papers);
+        assert_eq!(result, "my-paper-2", "should suffix when images dir exists");
+
+        // Stale directory must be untouched.
+        assert!(sentinel.exists(), "stale sentinel file must still exist");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"stale");
+    }
+
+    #[test]
+    fn test_deduplicate_title_images_dir_chain_collision() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path().join("vault");
+        let papers = dir.path().join("papers");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+
+        // "paper" blocked by .md, "paper-2" blocked by images dir, "paper-3" blocked by .pdf
+        std::fs::write(vault.join("paper.md"), b"a").unwrap();
+        let images_2 = vault.join("assets").join("images").join("paper-2");
+        std::fs::create_dir_all(&images_2).unwrap();
+        std::fs::write(papers.join("paper-3.pdf"), b"c").unwrap();
+
+        let result = deduplicate_title("paper", &vault, &papers);
+        assert_eq!(result, "paper-4");
     }
 }

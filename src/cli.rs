@@ -17,17 +17,17 @@ pub struct Cli {
     #[arg(long, default_value_t = 0)]
     pub trail: usize,
 
-    /// Path to the Obsidian vault output directory
-    #[arg(long, default_value = "~/Documents/Ekuro/")]
-    pub vault: PathBuf,
+    /// Path to the Obsidian vault output directory [default: ~/Documents/Ekuro/]
+    #[arg(long)]
+    pub vault: Option<PathBuf>,
 
-    /// Path to archive processed PDFs
-    #[arg(long, default_value = "~/Documents/Papers/")]
-    pub papers: PathBuf,
+    /// Path to archive processed PDFs [default: ~/Documents/Papers/]
+    #[arg(long)]
+    pub papers: Option<PathBuf>,
 
-    /// LLM model for title extraction
-    #[arg(long, default_value = "gpt-4o-mini")]
-    pub model: String,
+    /// LLM model for title extraction [default: gpt-4o-mini]
+    #[arg(long)]
+    pub model: Option<String>,
 
     /// Show proposed actions without executing
     #[arg(long, default_value_t = false)]
@@ -48,9 +48,9 @@ mod tests {
         assert_eq!(cli.files, vec![PathBuf::from("paper.pdf")]);
         assert_eq!(cli.lead, 0);
         assert_eq!(cli.trail, 0);
-        assert_eq!(cli.vault, PathBuf::from("~/Documents/Ekuro/"));
-        assert_eq!(cli.papers, PathBuf::from("~/Documents/Papers/"));
-        assert_eq!(cli.model, "gpt-4o-mini");
+        assert!(cli.vault.is_none());
+        assert!(cli.papers.is_none());
+        assert!(cli.model.is_none());
         assert!(!cli.dry_run);
         assert!(!cli.verbose);
     }
@@ -63,9 +63,9 @@ mod tests {
         assert_eq!(cli.trail, 3);
         // Other defaults unaffected
         assert_eq!(cli.files, vec![PathBuf::from("paper.pdf")]);
-        assert_eq!(cli.vault, PathBuf::from("~/Documents/Ekuro/"));
-        assert_eq!(cli.papers, PathBuf::from("~/Documents/Papers/"));
-        assert_eq!(cli.model, "gpt-4o-mini");
+        assert!(cli.vault.is_none());
+        assert!(cli.papers.is_none());
+        assert!(cli.model.is_none());
         assert!(!cli.dry_run);
         assert!(!cli.verbose);
     }

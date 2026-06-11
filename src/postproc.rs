@@ -1,7 +1,7 @@
 // Mistral OCR post-processing: per-page image saving, markdown image ref replacement,
 // page comment headers, and double-newline page joining.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -9,7 +9,7 @@ use base64::Engine as _;
 use regex::Regex;
 
 use crate::error::Result;
-use crate::ocr::OcrPage;
+use crate::ocr::{OcrImage, OcrPage};
 
 /// Regex matching markdown image syntax: `![alt](src)`.
 static RE_MD_IMAGE: LazyLock<Regex> =
@@ -37,12 +37,12 @@ pub fn postprocess(
 
     for page in pages {
         let mut id_to_path: HashMap<String, String> = HashMap::new();
+        let mut used_filenames: HashSet<String> = HashSet::new();
 
         // Save each image that has base64 data
         for img in &page.images {
             if let Some(ref b64) = img.image_base64 {
-                let sanitized_id = sanitize_image_id(&img.id);
-                let filename = format!("page_{}_{}.png", page.index, sanitized_id);
+                let filename = make_unique_filename(page.index, &img.id, &mut used_filenames);
                 let abs_path = output_dir.join(&filename);
                 save_image_as_png(b64, &abs_path)?;
                 let rel_path = format!("{stem}/{filename}");
@@ -51,8 +51,16 @@ pub fn postprocess(
             }
         }
 
+        // Build unsaved-images map for placeholder generation
+        let unsaved_images: HashMap<&str, &OcrImage> = page
+            .images
+            .iter()
+            .filter(|img| !id_to_path.contains_key(&img.id))
+            .map(|img| (img.id.as_str(), img))
+            .collect();
+
         // Replace image refs in markdown
-        let processed_md = replace_image_refs(&page.markdown, &id_to_path);
+        let processed_md = replace_image_refs(&page.markdown, &id_to_path, &unsaved_images);
 
         // Build page block
         let comment = page_comment(page.index, page.images.len());
@@ -83,11 +91,30 @@ fn strip_data_uri_prefix(s: &str) -> &str {
     }
 }
 
-/// Sanitize an image ID by removing common image file extensions.
+/// Sanitize an image ID by replacing dots with underscores.
+/// This preserves extension information so that IDs differing only by extension
+/// (e.g. `img_0.jpeg` vs `img_0.png`) produce distinct sanitized names.
 fn sanitize_image_id(id: &str) -> String {
-    id.replace(".jpeg", "")
-        .replace(".jpg", "")
-        .replace(".png", "")
+    id.replace('.', "_")
+}
+
+/// Build a collision-free PNG filename for a page image.
+/// Inserts the chosen filename into `used` before returning.
+fn make_unique_filename(page_index: u32, image_id: &str, used: &mut HashSet<String>) -> String {
+    let sanitized = sanitize_image_id(image_id);
+    let base = format!("page_{}_{}.png", page_index, sanitized);
+    if used.insert(base.clone()) {
+        return base;
+    }
+    // Disambiguate with a numeric suffix
+    let mut counter = 2u32;
+    loop {
+        let candidate = format!("page_{}_{}_{}.png", page_index, sanitized, counter);
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        counter += 1;
+    }
 }
 
 /// Save a single base64-encoded image as PNG to `output_path`.
@@ -99,16 +126,37 @@ fn save_image_as_png(base64_data: &str, output_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Format an image placeholder string from OcrImage metadata.
+/// Coordinates default to 0 when None (matching Python behavior).
+fn format_placeholder(img: &OcrImage, alt: &str) -> String {
+    let x = img.top_left_x.unwrap_or(0);
+    let y = img.top_left_y.unwrap_or(0);
+    let w = img.bottom_right_x.unwrap_or(0) - x;
+    let h = img.bottom_right_y.unwrap_or(0) - y;
+    format!(
+        "[IMAGE_PLACEHOLDER: {} - Position: ({}, {}) Size: {}x{} - {}]",
+        img.id, x, y, w, h, alt
+    )
+}
+
 /// Replace `![alt](src)` references in markdown text where `src` matches
-/// a known image ID, substituting the saved relative path.
-fn replace_image_refs(markdown: &str, id_to_path: &HashMap<String, String>) -> String {
+/// a known image ID, substituting the saved relative path. For images that
+/// are in the OCR response but have no base64 data, emit a positioned placeholder.
+fn replace_image_refs(
+    markdown: &str,
+    id_to_path: &HashMap<String, String>,
+    unsaved_images: &HashMap<&str, &OcrImage>,
+) -> String {
     RE_MD_IMAGE
         .replace_all(markdown, |caps: &regex::Captures| {
             let alt = &caps[1];
             let src = &caps[2];
-            match id_to_path.get(src) {
-                Some(path) => format!("![{alt}]({path})"),
-                None => caps[0].to_string(),
+            if let Some(path) = id_to_path.get(src) {
+                format!("![{alt}]({path})")
+            } else if let Some(img) = unsaved_images.get(src) {
+                format_placeholder(img, alt)
+            } else {
+                caps[0].to_string()
             }
         })
         .into_owned()
@@ -219,21 +267,22 @@ mod tests {
             "stem/page_0_img_0.png".to_string(),
         );
         map.insert("img_1".to_string(), "stem/page_0_img_1.png".to_string());
+        let empty_unsaved: HashMap<&str, &crate::ocr::OcrImage> = HashMap::new();
 
         // Single replacement
-        let result = replace_image_refs("![Fig 1](img_0.jpeg)", &map);
+        let result = replace_image_refs("![Fig 1](img_0.jpeg)", &map, &empty_unsaved);
         assert_eq!(result, "![Fig 1](stem/page_0_img_0.png)");
 
         // Multiple replacements in one string
         let input = "Text ![Fig 1](img_0.jpeg) middle ![Fig 2](img_1) end";
-        let result = replace_image_refs(input, &map);
+        let result = replace_image_refs(input, &map, &empty_unsaved);
         assert_eq!(
             result,
             "Text ![Fig 1](stem/page_0_img_0.png) middle ![Fig 2](stem/page_0_img_1.png) end"
         );
 
         // Alt text with special characters preserved
-        let result = replace_image_refs("![Fig (a) & b](img_0.jpeg)", &map);
+        let result = replace_image_refs("![Fig (a) & b](img_0.jpeg)", &map, &empty_unsaved);
         assert_eq!(result, "![Fig (a) & b](stem/page_0_img_0.png)");
     }
 
@@ -241,14 +290,15 @@ mod tests {
     fn test_unknown_image_id_left_unchanged() {
         let mut map = HashMap::new();
         map.insert("img_0".to_string(), "stem/page_0_img_0.png".to_string());
+        let empty_unsaved: HashMap<&str, &crate::ocr::OcrImage> = HashMap::new();
 
         // Unknown ID should be left as-is
-        let result = replace_image_refs("![Fig](unknown_img)", &map);
+        let result = replace_image_refs("![Fig](unknown_img)", &map, &empty_unsaved);
         assert_eq!(result, "![Fig](unknown_img)");
 
         // Mixed: known and unknown
         let input = "![A](img_0) text ![B](unknown_img)";
-        let result = replace_image_refs(input, &map);
+        let result = replace_image_refs(input, &map, &empty_unsaved);
         assert_eq!(result, "![A](stem/page_0_img_0.png) text ![B](unknown_img)");
     }
 
@@ -319,11 +369,277 @@ Page two content";
     }
 
     #[test]
-    fn test_sanitize_image_id() {
-        assert_eq!(sanitize_image_id("img_0.jpeg"), "img_0");
-        assert_eq!(sanitize_image_id("img_0.jpg"), "img_0");
-        assert_eq!(sanitize_image_id("img_0.png"), "img_0");
+    fn test_sanitize_image_id_preserves_extension() {
+        assert_eq!(sanitize_image_id("img_0.jpeg"), "img_0_jpeg");
+        assert_eq!(sanitize_image_id("img_0.jpg"), "img_0_jpg");
+        assert_eq!(sanitize_image_id("img_0.png"), "img_0_png");
         assert_eq!(sanitize_image_id("img_0"), "img_0");
-        assert_eq!(sanitize_image_id("figure.1.jpeg"), "figure.1");
+        assert_eq!(sanitize_image_id("figure.1.jpeg"), "figure_1_jpeg");
+    }
+
+    #[test]
+    fn test_colliding_extensions_produce_distinct_filenames() {
+        use crate::ocr::OcrImage;
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let jpeg_b64 = make_test_jpeg_base64();
+
+        let pages = vec![OcrPage {
+            index: 0,
+            markdown: "![A](img_0.jpeg) ![B](img_0.png)".into(),
+            images: vec![
+                OcrImage {
+                    id: "img_0.jpeg".into(),
+                    top_left_x: None,
+                    top_left_y: None,
+                    bottom_right_x: None,
+                    bottom_right_y: None,
+                    image_base64: Some(jpeg_b64.clone()),
+                },
+                OcrImage {
+                    id: "img_0.png".into(),
+                    top_left_x: None,
+                    top_left_y: None,
+                    bottom_right_x: None,
+                    bottom_right_y: None,
+                    image_base64: Some(jpeg_b64),
+                },
+            ],
+            dimensions: None,
+        }];
+
+        let result = postprocess(&pages, tmp_dir.path(), "stem").unwrap();
+
+        // Two distinct files must be saved
+        assert_eq!(result.saved_images.len(), 2);
+        assert_ne!(
+            result.saved_images[0], result.saved_images[1],
+            "two images with different extensions must produce distinct filenames"
+        );
+
+        // Both files must exist on disk
+        for rel in &result.saved_images {
+            let fname = rel.strip_prefix("stem/").unwrap();
+            assert!(
+                tmp_dir.path().join(fname).exists(),
+                "file should exist: {fname}"
+            );
+        }
+
+        // Markdown must reference both distinct paths
+        assert!(
+            result.markdown.contains(&result.saved_images[0]),
+            "markdown should reference first image"
+        );
+        assert!(
+            result.markdown.contains(&result.saved_images[1]),
+            "markdown should reference second image"
+        );
+    }
+
+    #[test]
+    fn test_format_placeholder_with_coordinates() {
+        use crate::ocr::OcrImage;
+        let img = OcrImage {
+            id: "img_3.jpeg".into(),
+            top_left_x: Some(100),
+            top_left_y: Some(200),
+            bottom_right_x: Some(400),
+            bottom_right_y: Some(500),
+            image_base64: None,
+        };
+        let result = format_placeholder(&img, "Figure 3");
+        assert_eq!(
+            result,
+            "[IMAGE_PLACEHOLDER: img_3.jpeg - Position: (100, 200) Size: 300x300 - Figure 3]"
+        );
+    }
+
+    #[test]
+    fn test_replace_image_refs_placeholder_for_unsaved() {
+        use crate::ocr::OcrImage;
+        let id_to_path: HashMap<String, String> = HashMap::new();
+        let img = OcrImage {
+            id: "img_3.jpeg".into(),
+            top_left_x: Some(10),
+            top_left_y: Some(20),
+            bottom_right_x: Some(110),
+            bottom_right_y: Some(220),
+            image_base64: None,
+        };
+        let unsaved: HashMap<&str, &OcrImage> = [("img_3.jpeg", &img)].into_iter().collect();
+
+        let result = replace_image_refs("![Fig](img_3.jpeg)", &id_to_path, &unsaved);
+        assert_eq!(
+            result,
+            "[IMAGE_PLACEHOLDER: img_3.jpeg - Position: (10, 20) Size: 100x200 - Fig]"
+        );
+    }
+
+    #[test]
+    fn test_replace_image_refs_saved_takes_priority() {
+        use crate::ocr::OcrImage;
+        let mut id_to_path = HashMap::new();
+        id_to_path.insert("img_0".to_string(), "stem/page_0_img_0.png".to_string());
+        // Even if img_0 is also in unsaved (shouldn't happen, but defensive)
+        let img = OcrImage {
+            id: "img_0".into(),
+            top_left_x: Some(0),
+            top_left_y: Some(0),
+            bottom_right_x: Some(100),
+            bottom_right_y: Some(100),
+            image_base64: None,
+        };
+        let unsaved: HashMap<&str, &OcrImage> = [("img_0", &img)].into_iter().collect();
+
+        let result = replace_image_refs("![A](img_0)", &id_to_path, &unsaved);
+        assert_eq!(result, "![A](stem/page_0_img_0.png)");
+    }
+
+    #[test]
+    fn test_postprocess_image_no_base64_emits_placeholder() {
+        use crate::ocr::OcrImage;
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let pages = vec![OcrPage {
+            index: 0,
+            markdown: "![Fig](img_3.jpeg)".into(),
+            images: vec![OcrImage {
+                id: "img_3.jpeg".into(),
+                top_left_x: Some(100),
+                top_left_y: Some(200),
+                bottom_right_x: Some(400),
+                bottom_right_y: Some(500),
+                image_base64: None,
+            }],
+            dimensions: None,
+        }];
+
+        let result = postprocess(&pages, tmp_dir.path(), "stem").unwrap();
+
+        assert!(
+            result.markdown.contains(
+                "[IMAGE_PLACEHOLDER: img_3.jpeg - Position: (100, 200) Size: 300x300 - Fig]"
+            ),
+            "should contain placeholder, got: {:?}",
+            result.markdown
+        );
+        assert!(result.saved_images.is_empty());
+    }
+
+    #[test]
+    fn test_postprocess_mixed_saved_and_unsaved_images() {
+        use crate::ocr::OcrImage;
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let jpeg_b64 = make_test_jpeg_base64();
+        let pages = vec![OcrPage {
+            index: 0,
+            markdown: "![A](img_0) text ![B](img_1)".into(),
+            images: vec![
+                OcrImage {
+                    id: "img_0".into(),
+                    top_left_x: None,
+                    top_left_y: None,
+                    bottom_right_x: None,
+                    bottom_right_y: None,
+                    image_base64: Some(jpeg_b64),
+                },
+                OcrImage {
+                    id: "img_1".into(),
+                    top_left_x: Some(50),
+                    top_left_y: Some(60),
+                    bottom_right_x: Some(150),
+                    bottom_right_y: Some(260),
+                    image_base64: None,
+                },
+            ],
+            dimensions: None,
+        }];
+
+        let result = postprocess(&pages, tmp_dir.path(), "stem").unwrap();
+
+        // img_0 should be saved and linked
+        assert!(
+            result.markdown.contains("![A](stem/page_0_img_0.png)"),
+            "saved image should be linked, got: {:?}",
+            result.markdown
+        );
+        // img_1 should be a placeholder
+        assert!(
+            result
+                .markdown
+                .contains("[IMAGE_PLACEHOLDER: img_1 - Position: (50, 60) Size: 100x200 - B]"),
+            "unsaved image should be placeholder, got: {:?}",
+            result.markdown
+        );
+        assert_eq!(result.saved_images.len(), 1);
+    }
+
+    #[test]
+    fn test_format_placeholder_with_none_coordinates() {
+        use crate::ocr::OcrImage;
+        let img = OcrImage {
+            id: "img_5".into(),
+            top_left_x: None,
+            top_left_y: None,
+            bottom_right_x: None,
+            bottom_right_y: None,
+            image_base64: None,
+        };
+        let result = format_placeholder(&img, "Alt");
+        assert_eq!(
+            result,
+            "[IMAGE_PLACEHOLDER: img_5 - Position: (0, 0) Size: 0x0 - Alt]"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_image_ids_get_disambiguated() {
+        use crate::ocr::OcrImage;
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let jpeg_b64 = make_test_jpeg_base64();
+
+        // Two images with the exact same ID (pathological but defensive)
+        let pages = vec![OcrPage {
+            index: 0,
+            markdown: "![A](img_0) ![B](img_0)".into(),
+            images: vec![
+                OcrImage {
+                    id: "img_0".into(),
+                    top_left_x: None,
+                    top_left_y: None,
+                    bottom_right_x: None,
+                    bottom_right_y: None,
+                    image_base64: Some(jpeg_b64.clone()),
+                },
+                OcrImage {
+                    id: "img_0".into(),
+                    top_left_x: None,
+                    top_left_y: None,
+                    bottom_right_x: None,
+                    bottom_right_y: None,
+                    image_base64: Some(jpeg_b64),
+                },
+            ],
+            dimensions: None,
+        }];
+
+        let result = postprocess(&pages, tmp_dir.path(), "stem").unwrap();
+
+        // Two files must be saved with distinct names
+        assert_eq!(result.saved_images.len(), 2);
+        assert_ne!(
+            result.saved_images[0], result.saved_images[1],
+            "duplicate image IDs must produce distinct filenames"
+        );
+
+        // Both files must exist on disk
+        for rel in &result.saved_images {
+            let fname = rel.strip_prefix("stem/").unwrap();
+            assert!(
+                tmp_dir.path().join(fname).exists(),
+                "file should exist: {fname}"
+            );
+        }
     }
 }

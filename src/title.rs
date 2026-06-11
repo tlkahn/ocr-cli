@@ -9,8 +9,12 @@ use regex::Regex;
 
 const TITLE_SYSTEM_PROMPT: &str = "\
 You are a bibliographic metadata extractor. Given the text of the first page of an academic paper or book, \
-return ONLY the title of the work. Do not include authors, affiliations, abstracts, or any other text. \
-Return the title exactly as it appears, on a single line, with no surrounding quotes or formatting.";
+extract the document title, author name(s), and publication year. \
+Return ONLY a filename stem in the format: book-title-first-author-year \
+(all lowercase, words separated by hyphens, no file extension). \
+If there are multiple authors, use the first author's last name followed by 'etc'. \
+If the year is not present on the page, omit it. \
+Do not include quotes, formatting, or any other text — just the single filename stem on one line.";
 
 static RE_ZLIB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\(z-library\)").unwrap());
 
@@ -157,7 +161,7 @@ mod tests {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "\"Attention Is All You Need\""
+                    "content": "attention-is-all-you-need-vaswani-etc-2017"
                 },
                 "finish_reason": "stop"
             }],
@@ -188,7 +192,10 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "extract_title failed: {result:?}");
-        assert_eq!(result.unwrap(), "attention-is-all-you-need");
+        assert_eq!(
+            result.unwrap(),
+            "attention-is-all-you-need-vaswani-etc-2017"
+        );
     }
 
     #[tokio::test]

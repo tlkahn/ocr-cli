@@ -1,6 +1,7 @@
 // Pipeline orchestration: process PDF files through 5 steps.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::cli::Cli;
 use crate::config::Config;
@@ -32,14 +33,34 @@ pub fn output_paths(title: &str, vault: &Path, papers: &Path) -> (PathBuf, PathB
     (md, pdf, images)
 }
 
-const OPENAI_BASE_URL: &str = "https://api.openai.com";
-const MISTRAL_BASE_URL: &str = "https://api.mistral.ai";
+/// Trait for extracting page text from PDF bytes (testability seam).
+pub(crate) trait PageTextFn {
+    fn page_text(
+        &self,
+        pdf_bytes: &[u8],
+        pdfium: &OnceLock<lmpdf::Pdfium>,
+        pdfium_path: &Path,
+    ) -> Result<String>;
+}
 
-/// Default page_text implementation using pdfium.
-fn default_page_text(pdf_bytes: &[u8], pdfium_path: &Path) -> Result<String> {
-    let pdfium = lmpdf::Pdfium::open(pdfium_path)?;
-    let doc = pdfium.load_document(pdf_bytes, None)?;
-    doc.page_text(0).map_err(Into::into)
+/// Default production implementation using pdfium.
+struct DefaultPageText;
+
+impl PageTextFn for DefaultPageText {
+    fn page_text(
+        &self,
+        pdf_bytes: &[u8],
+        pdfium: &OnceLock<lmpdf::Pdfium>,
+        pdfium_path: &Path,
+    ) -> Result<String> {
+        if pdfium.get().is_none() {
+            let p = lmpdf::Pdfium::open(pdfium_path)?;
+            let _ = pdfium.set(p);
+        }
+        let pdfium = pdfium.get().expect("pdfium initialised above");
+        let doc = pdfium.load_document(pdf_bytes, None)?;
+        doc.page_text(0).map_err(Into::into)
+    }
 }
 
 /// Public entry point: process a single PDF file through the 5-step pipeline.
@@ -49,46 +70,39 @@ pub async fn process_file(
     config: &Config,
     client: &reqwest::Client,
 ) -> Result<Option<ProcessResult>> {
-    process_file_with(
-        input,
-        cli,
-        config,
-        client,
-        default_page_text,
-        OPENAI_BASE_URL,
-        MISTRAL_BASE_URL,
-    )
-    .await
+    let pdfium = OnceLock::new();
+    process_file_inner(input, cli, config, client, &DefaultPageText, &pdfium).await
 }
 
-/// Testable inner implementation with injectable page_text function and base URLs.
-async fn process_file_with(
+/// Testable inner implementation with injectable page_text trait and base URLs from config.
+pub(crate) async fn process_file_inner(
     input: &Path,
     cli: &Cli,
     config: &Config,
     client: &reqwest::Client,
-    page_text_fn: fn(&[u8], &Path) -> Result<String>,
-    openai_base_url: &str,
-    mistral_base_url: &str,
+    page_text_fn: &dyn PageTextFn,
+    pdfium: &OnceLock<lmpdf::Pdfium>,
 ) -> Result<Option<ProcessResult>> {
     let filename = input.file_name().unwrap_or_default().to_string_lossy();
 
     // Step 1: Truncate
     eprintln!("[1/5] Truncating {filename}...");
-    let pdf_bytes = crate::truncate::truncate_pdf(input, cli.lead, cli.trail, &config.pdfium_path)?;
+    let pdf_bytes =
+        crate::truncate::truncate_pdf(input, cli.lead, cli.trail, pdfium, &config.pdfium_path)?;
 
     // Step 2: Extract title
     eprintln!("[2/5] Extracting title...");
-    let page_text = page_text_fn(&pdf_bytes, &config.pdfium_path)?;
+    let page_text = page_text_fn.page_text(&pdf_bytes, pdfium, &config.pdfium_path)?;
     let title = crate::title::extract_title(
         &page_text,
         &config.model,
         &config.openai_api_key,
-        openai_base_url,
+        &config.openai_base_url,
     )
     .await?;
 
     if cli.dry_run {
+        let title = deduplicate_title(&title, &config.vault_path, &config.papers_path);
         let (md, pdf, _img) = output_paths(&title, &config.vault_path, &config.papers_path);
         eprintln!("[dry-run] Proposed filename: {title}");
         eprintln!("[dry-run]   markdown: {}", md.display());
@@ -100,7 +114,7 @@ async fn process_file_with(
     eprintln!("[3/5] Running OCR...");
     let ocr_response = crate::ocr::ocr_pdf(
         client,
-        mistral_base_url,
+        &config.mistral_base_url,
         &config.mistral_api_key,
         &pdf_bytes,
         true,
@@ -109,6 +123,7 @@ async fn process_file_with(
 
     // Step 4: Post-process
     eprintln!("[4/5] Post-processing...");
+    let title = deduplicate_title(&title, &config.vault_path, &config.papers_path);
     let (md_path, pdf_path, images_dir) =
         output_paths(&title, &config.vault_path, &config.papers_path);
     let output = crate::postproc::postprocess(&ocr_response.pages, &images_dir, &title)?;
@@ -117,6 +132,13 @@ async fn process_file_with(
     eprintln!("[5/5] Writing outputs...");
     if let Some(parent) = md_path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    if md_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("markdown file already exists: {}", md_path.display()),
+        )
+        .into());
     }
     std::fs::write(&md_path, &output.markdown)?;
 
@@ -141,38 +163,24 @@ pub async fn process_batch(
     cli: &Cli,
     config: &Config,
 ) -> Vec<(PathBuf, Result<Option<ProcessResult>>)> {
-    process_batch_with(
-        cli,
-        config,
-        default_page_text,
-        OPENAI_BASE_URL,
-        MISTRAL_BASE_URL,
-    )
-    .await
+    process_batch_inner(cli, config, &DefaultPageText).await
 }
 
-/// Testable batch processing with injectable dependencies.
-async fn process_batch_with(
+/// Testable batch processing with injectable page_text trait.
+///
+/// A single `OnceLock<lmpdf::Pdfium>` is created here and shared across
+/// all files in the batch, so the library is loaded at most once.
+pub(crate) async fn process_batch_inner(
     cli: &Cli,
     config: &Config,
-    page_text_fn: fn(&[u8], &Path) -> Result<String>,
-    openai_base_url: &str,
-    mistral_base_url: &str,
+    page_text_fn: &dyn PageTextFn,
 ) -> Vec<(PathBuf, Result<Option<ProcessResult>>)> {
     let client = reqwest::Client::new();
+    let pdfium = OnceLock::new();
     let mut results = Vec::new();
     for path in &cli.files {
         eprintln!("\n=== Processing: {} ===", path.display());
-        let result = process_file_with(
-            path,
-            cli,
-            config,
-            &client,
-            page_text_fn,
-            openai_base_url,
-            mistral_base_url,
-        )
-        .await;
+        let result = process_file_inner(path, cli, config, &client, page_text_fn, &pdfium).await;
         if let Err(ref e) = result {
             eprintln!("ERROR processing {}: {e}", path.display());
         }
@@ -181,9 +189,37 @@ async fn process_batch_with(
     results
 }
 
+/// If `vault/{title}.md` or `papers/{title}.pdf` already exists, append a
+/// numeric suffix (`-2`, `-3`, ...) until both slots are free. Returns the
+/// (possibly suffixed) title.
+fn deduplicate_title(title: &str, vault: &Path, papers: &Path) -> String {
+    let (md, pdf, _) = output_paths(title, vault, papers);
+    if !md.exists() && !pdf.exists() {
+        return title.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{title}-{n}");
+        let (md, pdf, _) = output_paths(&candidate, vault, papers);
+        if !md.exists() && !pdf.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Move a file from `src` to `dst`, trying `fs::rename` first and falling back
 /// to `fs::copy` + `fs::remove_file` for cross-device moves.
+///
+/// Returns `Err(Error::Io(AlreadyExists))` if `dst` already exists (no-clobber).
 fn move_file(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("destination already exists: {}", dst.display()),
+        )
+        .into());
+    }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -244,8 +280,43 @@ mod tests {
         );
     }
 
-    fn mock_page_text(_pdf_bytes: &[u8], _pdfium_path: &Path) -> crate::error::Result<String> {
-        Ok("fake page text for title extraction".into())
+    #[test]
+    fn test_move_file_refuses_overwrite() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("source.pdf");
+        let dst = dir.path().join("dest.pdf");
+        std::fs::write(&src, b"new content").unwrap();
+        std::fs::write(&dst, b"original content").unwrap();
+
+        let result = move_file(&src, &dst);
+        assert!(result.is_err(), "move_file should refuse to overwrite");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Io(_)),
+            "expected Error::Io, got: {err:?}"
+        );
+
+        // Destination content should be unchanged.
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"original content",
+            "destination should not be modified"
+        );
+        // Source should still exist (move was refused).
+        assert!(src.exists(), "source should still exist after refused move");
+    }
+
+    struct MockPageText;
+
+    impl PageTextFn for MockPageText {
+        fn page_text(
+            &self,
+            _pdf_bytes: &[u8],
+            _pdfium: &OnceLock<lmpdf::Pdfium>,
+            _pdfium_path: &Path,
+        ) -> crate::error::Result<String> {
+            Ok("fake page text for title extraction".into())
+        }
     }
 
     #[tokio::test]
@@ -264,7 +335,7 @@ mod tests {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "Test Title From LLM"
+                    "content": "test-title-from-llm-smith-2024"
                 },
                 "finish_reason": "stop"
             }],
@@ -305,9 +376,9 @@ mod tests {
             files: vec![input_pdf.clone()],
             lead: 0,
             trail: 0,
-            vault: vault.clone(),
-            papers: papers.clone(),
-            model: "gpt-4o-mini".into(),
+            vault: Some(vault.clone()),
+            papers: Some(papers.clone()),
+            model: Some("gpt-4o-mini".into()),
             dry_run: true,
             verbose: false,
         };
@@ -318,23 +389,18 @@ mod tests {
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
+            openai_base_url: mock_server.uri(),
+            mistral_base_url: mock_server.uri(),
         };
         let client = reqwest::Client::new();
 
-        let result = process_file_with(
-            &input_pdf,
-            &cli,
-            &config,
-            &client,
-            mock_page_text,
-            &mock_server.uri(),
-            &mock_server.uri(),
-        )
-        .await;
+        let pdfium = OnceLock::new();
+        let result =
+            process_file_inner(&input_pdf, &cli, &config, &client, &MockPageText, &pdfium).await;
 
         assert!(
             result.is_ok(),
-            "process_file_with should succeed: {result:?}"
+            "process_file_inner should succeed: {result:?}"
         );
         assert!(result.unwrap().is_none(), "dry-run should return Ok(None)");
         // wiremock will verify OCR endpoint was never called on drop.
@@ -371,7 +437,7 @@ mod tests {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "Test Paper"
+                    "content": "test-paper-doe-2023"
                 },
                 "finish_reason": "stop"
             }],
@@ -434,9 +500,9 @@ mod tests {
             files: vec![input_pdf.clone()],
             lead: 0,
             trail: 0,
-            vault: vault.clone(),
-            papers: papers.clone(),
-            model: "gpt-4o-mini".into(),
+            vault: Some(vault.clone()),
+            papers: Some(papers.clone()),
+            model: Some("gpt-4o-mini".into()),
             dry_run: false,
             verbose: false,
         };
@@ -447,31 +513,26 @@ mod tests {
             vault_path: vault.clone(),
             papers_path: papers.clone(),
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
+            openai_base_url: mock_server.uri(),
+            mistral_base_url: mock_server.uri(),
         };
         let client = reqwest::Client::new();
 
-        let result = process_file_with(
-            &input_pdf,
-            &cli,
-            &config,
-            &client,
-            mock_page_text,
-            &mock_server.uri(),
-            &mock_server.uri(),
-        )
-        .await;
+        let pdfium = OnceLock::new();
+        let result =
+            process_file_inner(&input_pdf, &cli, &config, &client, &MockPageText, &pdfium).await;
 
         assert!(
             result.is_ok(),
-            "process_file_with should succeed: {result:?}"
+            "process_file_inner should succeed: {result:?}"
         );
         let pr = result.unwrap().expect("should return Some(ProcessResult)");
 
         // Title should be sanitized.
-        assert_eq!(pr.title, "test-paper");
+        assert_eq!(pr.title, "test-paper-doe-2023");
 
         // Markdown file should exist.
-        assert_eq!(pr.markdown_path, vault.join("test-paper.md"));
+        assert_eq!(pr.markdown_path, vault.join("test-paper-doe-2023.md"));
         assert!(pr.markdown_path.exists(), "markdown file should exist");
         let md_contents = std::fs::read_to_string(&pr.markdown_path).unwrap();
         assert!(
@@ -484,7 +545,7 @@ mod tests {
         );
 
         // PDF should be moved to papers.
-        assert_eq!(pr.pdf_path, papers.join("test-paper.pdf"));
+        assert_eq!(pr.pdf_path, papers.join("test-paper-doe-2023.pdf"));
         assert!(pr.pdf_path.exists(), "PDF should be archived");
         assert!(!input_pdf.exists(), "original PDF should be moved");
 
@@ -520,7 +581,7 @@ mod tests {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "Batch Test Paper"
+                    "content": "batch-test-paper-lee-etc-2022"
                 },
                 "finish_reason": "stop"
             }],
@@ -557,9 +618,9 @@ mod tests {
             files: vec![valid1.clone(), missing.clone(), valid2.clone()],
             lead: 0,
             trail: 0,
-            vault: vault.clone(),
-            papers: papers.clone(),
-            model: "gpt-4o-mini".into(),
+            vault: Some(vault.clone()),
+            papers: Some(papers.clone()),
+            model: Some("gpt-4o-mini".into()),
             dry_run: true, // Use dry-run so we don't need OCR mock.
             verbose: false,
         };
@@ -570,16 +631,11 @@ mod tests {
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
+            openai_base_url: mock_server.uri(),
+            mistral_base_url: mock_server.uri(),
         };
 
-        let results = process_batch_with(
-            &cli,
-            &config,
-            mock_page_text,
-            &mock_server.uri(),
-            &mock_server.uri(),
-        )
-        .await;
+        let results = process_batch_inner(&cli, &config, &MockPageText).await;
 
         assert_eq!(results.len(), 3, "should have results for all 3 files");
 
@@ -607,6 +663,65 @@ mod tests {
     }
 
     #[test]
+    fn test_deduplicate_title_no_collision() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path().join("vault");
+        let papers = dir.path().join("papers");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+
+        let result = deduplicate_title("my-paper", &vault, &papers);
+        assert_eq!(result, "my-paper");
+    }
+
+    #[test]
+    fn test_deduplicate_title_md_collision() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path().join("vault");
+        let papers = dir.path().join("papers");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+
+        // Create a conflicting .md file.
+        std::fs::write(vault.join("my-paper.md"), b"existing").unwrap();
+
+        let result = deduplicate_title("my-paper", &vault, &papers);
+        assert_eq!(result, "my-paper-2");
+    }
+
+    #[test]
+    fn test_deduplicate_title_pdf_collision() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path().join("vault");
+        let papers = dir.path().join("papers");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+
+        // Create a conflicting .pdf file (but no .md).
+        std::fs::write(papers.join("my-paper.pdf"), b"existing").unwrap();
+
+        let result = deduplicate_title("my-paper", &vault, &papers);
+        assert_eq!(result, "my-paper-2");
+    }
+
+    #[test]
+    fn test_deduplicate_title_multiple_collisions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault = dir.path().join("vault");
+        let papers = dir.path().join("papers");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+
+        // untitled blocked by .md, untitled-2 blocked by .md, untitled-3 blocked by .pdf
+        std::fs::write(vault.join("untitled.md"), b"a").unwrap();
+        std::fs::write(vault.join("untitled-2.md"), b"b").unwrap();
+        std::fs::write(papers.join("untitled-3.pdf"), b"c").unwrap();
+
+        let result = deduplicate_title("untitled", &vault, &papers);
+        assert_eq!(result, "untitled-4");
+    }
+
+    #[test]
     fn test_output_paths_with_nested_vault_and_papers() {
         let (md, pdf, img) = output_paths(
             "my-paper",
@@ -630,6 +745,145 @@ mod tests {
         assert_eq!(md, PathBuf::from("/vault/untitled.md"));
         assert_eq!(pdf, PathBuf::from("/papers/untitled.pdf"));
         assert_eq!(img, PathBuf::from("/vault/assets/images/untitled"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_deduplicates_colliding_titles() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Mock LLM title extraction -- returns the same title for every call.
+        let title_body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "batch-test-paper-lee-etc-2022"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_json(&title_body),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Mock Mistral OCR with a simple page (no images for simplicity).
+        let ocr_body = serde_json::json!({
+            "model": "mistral-ocr-latest",
+            "pages": [{
+                "index": 0,
+                "markdown": "# Content",
+                "images": []
+            }],
+            "usage_info": { "pages_processed": 1 }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/ocr"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_json(&ocr_body),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // Set up temp dirs.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pdf1 = tmp.path().join("first.pdf");
+        let pdf2 = tmp.path().join("second.pdf");
+        std::fs::write(&pdf1, b"%PDF-first").unwrap();
+        std::fs::write(&pdf2, b"%PDF-second").unwrap();
+        let vault = tmp.path().join("vault");
+        let papers = tmp.path().join("papers");
+
+        let cli = crate::cli::Cli {
+            files: vec![pdf1.clone(), pdf2.clone()],
+            lead: 0,
+            trail: 0,
+            vault: Some(vault.clone()),
+            papers: Some(papers.clone()),
+            model: Some("gpt-4o-mini".into()),
+            dry_run: false,
+            verbose: false,
+        };
+        let config = crate::config::Config {
+            mistral_api_key: "sk-mistral-test".into(),
+            openai_api_key: "sk-openai-test".into(),
+            model: "gpt-4o-mini".into(),
+            vault_path: vault.clone(),
+            papers_path: papers.clone(),
+            pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
+            openai_base_url: mock_server.uri(),
+            mistral_base_url: mock_server.uri(),
+        };
+
+        let results = process_batch_inner(&cli, &config, &MockPageText).await;
+
+        assert_eq!(results.len(), 2, "should have results for both files");
+
+        // Both should succeed.
+        let pr1 = results[0]
+            .1
+            .as_ref()
+            .expect("first file should succeed")
+            .as_ref()
+            .expect("first file should return Some");
+        let pr2 = results[1]
+            .1
+            .as_ref()
+            .expect("second file should succeed")
+            .as_ref()
+            .expect("second file should return Some");
+
+        // They should have different titles.
+        assert_eq!(pr1.title, "batch-test-paper-lee-etc-2022");
+        assert_eq!(pr2.title, "batch-test-paper-lee-etc-2022-2");
+
+        // Both .md files should exist.
+        assert!(
+            pr1.markdown_path.exists(),
+            "first markdown should exist: {}",
+            pr1.markdown_path.display()
+        );
+        assert!(
+            pr2.markdown_path.exists(),
+            "second markdown should exist: {}",
+            pr2.markdown_path.display()
+        );
+
+        // Both .pdf files should exist in papers/.
+        assert!(
+            pr1.pdf_path.exists(),
+            "first pdf should exist: {}",
+            pr1.pdf_path.display()
+        );
+        assert!(
+            pr2.pdf_path.exists(),
+            "second pdf should exist: {}",
+            pr2.pdf_path.display()
+        );
+
+        // Paths should differ.
+        assert_ne!(pr1.markdown_path, pr2.markdown_path);
+        assert_ne!(pr1.pdf_path, pr2.pdf_path);
     }
 
     #[test]

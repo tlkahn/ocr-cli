@@ -14,9 +14,11 @@ pub struct Config {
     pub vault_path: PathBuf,
     pub papers_path: PathBuf,
     pub pdfium_path: PathBuf,
+    pub openai_base_url: String,
+    pub mistral_base_url: String,
 }
 
-/// Default sentinel values matching clap defaults in `Cli`.
+/// Default values for optional CLI flags.
 const DEFAULT_VAULT: &str = "~/Documents/Ekuro/";
 const DEFAULT_PAPERS: &str = "~/Documents/Papers/";
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
@@ -44,37 +46,41 @@ impl Config {
         let home = env_non_empty(&env, "HOME");
         let home_ref = home.as_deref();
 
-        // Vault path: CLI flag -> env var -> default (with tilde expansion).
-        let vault_path = if cli.vault != PathBuf::from(DEFAULT_VAULT) {
-            cli.vault.clone()
-        } else if let Some(val) = env_non_empty(&env, "OCR_VAULT_PATH") {
-            PathBuf::from(val)
-        } else {
-            expand_tilde(std::path::Path::new(DEFAULT_VAULT), home_ref)
-        };
+        // Vault path: CLI flag (Some) -> env var -> default (with tilde expansion).
+        let vault_raw = cli
+            .vault
+            .clone()
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| env_non_empty(&env, "OCR_VAULT_PATH"))
+            .unwrap_or_else(|| DEFAULT_VAULT.to_string());
+        let vault_path = expand_tilde(std::path::Path::new(&vault_raw), home_ref);
 
-        // Papers path: CLI flag -> env var -> default (with tilde expansion).
-        let papers_path = if cli.papers != PathBuf::from(DEFAULT_PAPERS) {
-            cli.papers.clone()
-        } else if let Some(val) = env_non_empty(&env, "OCR_PAPERS_PATH") {
-            PathBuf::from(val)
-        } else {
-            expand_tilde(std::path::Path::new(DEFAULT_PAPERS), home_ref)
-        };
+        // Papers path: CLI flag (Some) -> env var -> default (with tilde expansion).
+        let papers_raw = cli
+            .papers
+            .clone()
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| env_non_empty(&env, "OCR_PAPERS_PATH"))
+            .unwrap_or_else(|| DEFAULT_PAPERS.to_string());
+        let papers_path = expand_tilde(std::path::Path::new(&papers_raw), home_ref);
 
-        // Model: CLI flag -> env var -> default.
-        let model = if cli.model != DEFAULT_MODEL {
-            cli.model.clone()
-        } else if let Some(val) = env_non_empty(&env, "LLM_DEFAULT_MODEL") {
-            val
-        } else {
-            DEFAULT_MODEL.to_string()
-        };
+        // Model: CLI flag (Some) -> env var -> default.
+        let model = cli
+            .model
+            .clone()
+            .or_else(|| env_non_empty(&env, "LLM_DEFAULT_MODEL"))
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         // Pdfium path: env var -> default.
         let pdfium_path = env_non_empty(&env, "PDFIUM_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/opt/homebrew/lib/libpdfium.dylib"));
+
+        // Base URLs: env var -> hardcoded default.
+        let openai_base_url = env_non_empty(&env, "OPENAI_BASE_URL")
+            .unwrap_or_else(|| "https://api.openai.com".to_string());
+        let mistral_base_url = env_non_empty(&env, "MISTRAL_BASE_URL")
+            .unwrap_or_else(|| "https://api.mistral.ai".to_string());
 
         Ok(Config {
             mistral_api_key,
@@ -83,6 +89,8 @@ impl Config {
             vault_path,
             papers_path,
             pdfium_path,
+            openai_base_url,
+            mistral_base_url,
         })
     }
 }
@@ -197,6 +205,45 @@ mod tests {
             config.pdfium_path,
             PathBuf::from("/opt/homebrew/lib/libpdfium.dylib")
         );
+        assert_eq!(config.openai_base_url, "https://api.openai.com");
+        assert_eq!(config.mistral_base_url, "https://api.mistral.ai");
+    }
+
+    #[test]
+    fn test_config_has_base_url_defaults() {
+        let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        assert_eq!(config.openai_base_url, "https://api.openai.com");
+        assert_eq!(config.mistral_base_url, "https://api.mistral.ai");
+    }
+
+    #[test]
+    fn test_config_base_url_from_env() {
+        let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "OPENAI_BASE_URL" => Some("https://custom-openai.example.com".into()),
+                "MISTRAL_BASE_URL" => Some("https://custom-mistral.example.com".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        assert_eq!(config.openai_base_url, "https://custom-openai.example.com");
+        assert_eq!(
+            config.mistral_base_url,
+            "https://custom-mistral.example.com"
+        );
     }
 
     #[test]
@@ -281,6 +328,68 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_vault_tilde_expanded() {
+        let cli = Cli::try_parse_from(["ocr-cli", "--vault", "~/my-vault", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        assert_eq!(config.vault_path, PathBuf::from("/fakehome/my-vault"));
+    }
+
+    #[test]
+    fn test_env_vault_tilde_expanded() {
+        let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "OCR_VAULT_PATH" => Some("~/env-vault".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        assert_eq!(config.vault_path, PathBuf::from("/fakehome/env-vault"));
+    }
+
+    #[test]
+    fn test_cli_papers_tilde_expanded() {
+        let cli = Cli::try_parse_from(["ocr-cli", "--papers", "~/my-papers", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        assert_eq!(config.papers_path, PathBuf::from("/fakehome/my-papers"));
+    }
+
+    #[test]
+    fn test_env_papers_tilde_expanded() {
+        let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "OCR_PAPERS_PATH" => Some("~/env-papers".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        assert_eq!(config.papers_path, PathBuf::from("/fakehome/env-papers"));
+    }
+
+    #[test]
     fn test_expand_tilde_with_home() {
         assert_eq!(
             expand_tilde(std::path::Path::new("~/foo/bar"), Some("/home/user")),
@@ -322,6 +431,65 @@ mod tests {
     fn test_config_is_debug_clone() {
         fn assert_debug_clone<T: std::fmt::Debug + Clone>() {}
         assert_debug_clone::<Config>();
+    }
+
+    #[test]
+    fn test_cli_vault_equal_to_default_overrides_env() {
+        let cli =
+            Cli::try_parse_from(["ocr-cli", "--vault", "~/Documents/Ekuro/", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "OCR_VAULT_PATH" => Some("/env/vault".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        // CLI flag should win even when its value equals the default.
+        assert_eq!(
+            config.vault_path,
+            PathBuf::from("/fakehome/Documents/Ekuro/")
+        );
+    }
+
+    #[test]
+    fn test_cli_papers_equal_to_default_overrides_env() {
+        let cli = Cli::try_parse_from(["ocr-cli", "--papers", "~/Documents/Papers/", "test.pdf"])
+            .unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "OCR_PAPERS_PATH" => Some("/env/papers".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        // CLI flag should win even when its value equals the default.
+        assert_eq!(
+            config.papers_path,
+            PathBuf::from("/fakehome/Documents/Papers/")
+        );
+    }
+
+    #[test]
+    fn test_cli_model_equal_to_default_overrides_env() {
+        let cli = Cli::try_parse_from(["ocr-cli", "--model", "gpt-4o-mini", "test.pdf"]).unwrap();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "LLM_DEFAULT_MODEL" => Some("gpt-4o".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::resolve_with(&cli, env).unwrap();
+        // CLI flag should win even when its value equals the default.
+        assert_eq!(config.model, "gpt-4o-mini");
     }
 
     #[test]

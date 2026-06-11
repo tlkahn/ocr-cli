@@ -131,8 +131,8 @@ fn save_image_as_png(base64_data: &str, output_path: &Path) -> Result<()> {
 fn format_placeholder(img: &OcrImage, alt: &str) -> String {
     let x = img.top_left_x.unwrap_or(0);
     let y = img.top_left_y.unwrap_or(0);
-    let w = img.bottom_right_x.unwrap_or(0) - x;
-    let h = img.bottom_right_y.unwrap_or(0) - y;
+    let w = (img.bottom_right_x.unwrap_or(0) - x).max(0);
+    let h = (img.bottom_right_y.unwrap_or(0) - y).max(0);
     format!(
         "[IMAGE_PLACEHOLDER: {} - Position: ({}, {}) Size: {}x{} - {}]",
         img.id, x, y, w, h, alt
@@ -589,6 +589,40 @@ Page two content";
         assert_eq!(
             result,
             "[IMAGE_PLACEHOLDER: img_5 - Position: (0, 0) Size: 0x0 - Alt]"
+        );
+    }
+
+    #[test]
+    fn test_format_placeholder_with_partial_coordinates() {
+        use crate::ocr::OcrImage;
+        // top_left is present but bottom_right is None -- width/height must not be negative
+        let img = OcrImage {
+            id: "img_partial".into(),
+            top_left_x: Some(100),
+            top_left_y: Some(200),
+            bottom_right_x: None,
+            bottom_right_y: None,
+            image_base64: None,
+        };
+        let result = format_placeholder(&img, "Partial");
+        assert_eq!(
+            result,
+            "[IMAGE_PLACEHOLDER: img_partial - Position: (100, 200) Size: 0x0 - Partial]"
+        );
+
+        // Also test the inverse: top_left None, bottom_right present
+        let img2 = OcrImage {
+            id: "img_partial2".into(),
+            top_left_x: None,
+            top_left_y: None,
+            bottom_right_x: Some(300),
+            bottom_right_y: Some(400),
+            image_base64: None,
+        };
+        let result2 = format_placeholder(&img2, "Partial2");
+        assert_eq!(
+            result2,
+            "[IMAGE_PLACEHOLDER: img_partial2 - Position: (0, 0) Size: 300x400 - Partial2]"
         );
     }
 

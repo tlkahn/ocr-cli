@@ -1,90 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use ocr_cli::config::Config;
 
-#[test]
-fn builder_with_required_fields_applies_defaults() {
-    let config = Config::builder("sk-mistral-test", "sk-openai-test")
-        .vault_path("/explicit/vault")
-        .papers_path("/explicit/papers")
-        .build()
-        .unwrap();
-
-    assert_eq!(config.mistral_api_key, "sk-mistral-test");
-    assert_eq!(config.openai_api_key, "sk-openai-test");
-    assert_eq!(config.model, "gpt-4o-mini");
-    assert_eq!(config.openai_base_url, "https://api.openai.com");
-    assert_eq!(config.mistral_base_url, "https://api.mistral.ai");
-}
-
-#[test]
-fn builder_with_all_overrides() {
-    let config = Config::builder("sk-m", "sk-o")
-        .model("o3")
-        .vault_path("/v")
-        .papers_path("/p")
-        .pdfium_path("/lib/pdfium.so")
-        .openai_base_url("https://custom.openai.example.com")
-        .mistral_base_url("https://custom.mistral.example.com")
-        .build()
-        .unwrap();
-
-    assert_eq!(config.model, "o3");
-    assert_eq!(config.vault_path, PathBuf::from("/v"));
-    assert_eq!(config.papers_path, PathBuf::from("/p"));
-    assert_eq!(config.pdfium_path, PathBuf::from("/lib/pdfium.so"));
-    assert_eq!(
-        config.openai_base_url,
-        "https://custom.openai.example.com"
-    );
-    assert_eq!(
-        config.mistral_base_url,
-        "https://custom.mistral.example.com"
-    );
-}
-
-#[test]
-fn builder_rejects_empty_mistral_key() {
-    let err = Config::builder("", "sk-openai")
-        .vault_path("/v")
-        .build()
-        .unwrap_err();
-    assert!(err.to_string().contains("mistral_api_key"));
-}
-
-#[test]
-fn builder_rejects_empty_openai_key() {
-    let err = Config::builder("sk-mistral", "")
-        .vault_path("/v")
-        .build()
-        .unwrap_err();
-    assert!(err.to_string().contains("openai_api_key"));
-}
-
-#[test]
-fn validate_returns_error_for_empty_keys() {
-    let err = Config::builder("", "sk-o")
-        .vault_path("/v")
-        .build()
-        .unwrap_err();
-    assert!(err.to_string().contains("mistral_api_key"));
-}
-
-#[test]
-fn debug_redacts_api_keys() {
-    let config = Config::builder("super-secret-mistral", "super-secret-openai")
-        .vault_path("/v")
-        .papers_path("/p")
-        .build()
-        .unwrap();
-    let debug = format!("{config:?}");
-
-    assert!(debug.contains("[REDACTED]"));
-    assert!(!debug.contains("super-secret-mistral"));
-    assert!(!debug.contains("super-secret-openai"));
-    assert!(debug.contains("gpt-4o-mini"));
-    assert!(debug.contains("/v"));
-}
+/// Serialize tests that mutate process-wide environment variables.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Demonstrates the Lit use case: injecting keys from an encrypted keystore.
 #[test]
@@ -102,4 +22,85 @@ fn lit_keystore_use_case() {
     assert_eq!(config.mistral_api_key, keystore_mistral);
     assert_eq!(config.openai_api_key, keystore_openai);
     assert_eq!(config.model, "gpt-4o");
+}
+
+// --- PDFIUM_PATH env var tests (serialized via ENV_MUTEX) ---
+
+#[test]
+fn builder_pdfium_path_from_env() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    let prev = std::env::var("PDFIUM_PATH").ok();
+
+    // SAFETY: env-var mutations are serialized by ENV_MUTEX; no other thread
+    // reads PDFIUM_PATH concurrently.
+    unsafe { std::env::set_var("PDFIUM_PATH", "/usr/lib/libpdfium.so") };
+    let config = Config::builder("sk-m", "sk-o")
+        .vault_path("/v")
+        .papers_path("/p")
+        .build()
+        .unwrap();
+
+    // Restore previous value before asserting (in case of panic, the mutex
+    // still protects us from concurrent access).
+    match &prev {
+        Some(v) => unsafe { std::env::set_var("PDFIUM_PATH", v) },
+        None => unsafe { std::env::remove_var("PDFIUM_PATH") },
+    }
+
+    assert_eq!(
+        config.pdfium_path,
+        PathBuf::from("/usr/lib/libpdfium.so"),
+        "builder should use PDFIUM_PATH env var when .pdfium_path() is not called"
+    );
+}
+
+#[test]
+fn builder_explicit_pdfium_path_overrides_env() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    let prev = std::env::var("PDFIUM_PATH").ok();
+
+    // SAFETY: serialized by ENV_MUTEX.
+    unsafe { std::env::set_var("PDFIUM_PATH", "/env/path/libpdfium.so") };
+    let config = Config::builder("sk-m", "sk-o")
+        .vault_path("/v")
+        .papers_path("/p")
+        .pdfium_path("/explicit/path/libpdfium.so")
+        .build()
+        .unwrap();
+
+    match &prev {
+        Some(v) => unsafe { std::env::set_var("PDFIUM_PATH", v) },
+        None => unsafe { std::env::remove_var("PDFIUM_PATH") },
+    }
+
+    assert_eq!(
+        config.pdfium_path,
+        PathBuf::from("/explicit/path/libpdfium.so"),
+        "explicit .pdfium_path() must override PDFIUM_PATH env var"
+    );
+}
+
+#[test]
+fn builder_empty_pdfium_env_uses_default() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    let prev = std::env::var("PDFIUM_PATH").ok();
+
+    // SAFETY: serialized by ENV_MUTEX.
+    unsafe { std::env::set_var("PDFIUM_PATH", "") };
+    let config = Config::builder("sk-m", "sk-o")
+        .vault_path("/v")
+        .papers_path("/p")
+        .build()
+        .unwrap();
+
+    match &prev {
+        Some(v) => unsafe { std::env::set_var("PDFIUM_PATH", v) },
+        None => unsafe { std::env::remove_var("PDFIUM_PATH") },
+    }
+
+    assert_eq!(
+        config.pdfium_path,
+        PathBuf::from("/opt/homebrew/lib/libpdfium.dylib"),
+        "empty PDFIUM_PATH env var should be treated as absent, falling back to default"
+    );
 }

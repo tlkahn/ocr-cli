@@ -64,7 +64,8 @@ pub fn postprocess(
 
         // Build page block
         let comment = page_comment(page.index, page.images.len());
-        page_blocks.push(format!("{comment}\n{processed_md}"));
+        let trimmed = processed_md.trim_start_matches('\n');
+        page_blocks.push(format!("{comment}\n\n{trimmed}"));
     }
 
     Ok(PostprocessedOutput {
@@ -354,17 +355,36 @@ mod tests {
         assert!(result.markdown.contains("<!-- Page 1 - 0 images -->"));
         assert!(result.markdown.contains("<!-- Page 2 - 0 images -->"));
 
-        // Verify exact structure: comment\nmarkdown\n\ncomment\nmarkdown\n\ncomment\nmarkdown
+        // Verify exact structure: comment\n\nmarkdown\n\ncomment\n\nmarkdown\n\ncomment\n\nmarkdown
         let expected = "\
 <!-- Page 0 - 0 images -->\n\
+\n\
 Page zero content\n\
 \n\
 <!-- Page 1 - 0 images -->\n\
+\n\
 Page one content\n\
 \n\
 <!-- Page 2 - 0 images -->\n\
+\n\
 Page two content";
 
+        assert_eq!(result.markdown, expected);
+    }
+
+    #[test]
+    fn test_leading_blank_lines_in_page_markdown_are_deduped() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let pages = vec![OcrPage {
+            index: 0,
+            markdown: "\n\nSome content".into(),
+            images: vec![],
+            dimensions: None,
+        }];
+
+        let result = postprocess(&pages, tmp_dir.path(), "stem").unwrap();
+
+        let expected = "<!-- Page 0 - 0 images -->\n\nSome content";
         assert_eq!(result.markdown, expected);
     }
 

@@ -33,7 +33,6 @@ ocr-cli *.pdf --dry-run
 | `--papers PATH` | `~/Documents/Papers/` | Archive directory for source PDFs |
 | `--model MODEL` | `gpt-4o-mini` | LLM model for title extraction |
 | `--dry-run` | off | Stop after title extraction, print proposed filename |
-| `--verbose` | off | Print detailed progress |
 
 ## Requirements
 

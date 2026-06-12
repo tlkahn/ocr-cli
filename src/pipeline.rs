@@ -1127,7 +1127,6 @@ mod tests {
             papers: Some(PathBuf::from("/papers")),
             model: Some("gpt-4o".into()),
             dry_run: true,
-            verbose: false,
         };
         let opts = Options::from(&cli);
         assert_eq!(opts.lead, 2);

@@ -32,10 +32,6 @@ pub struct Cli {
     /// Show proposed actions without executing
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
-
-    /// Enable verbose output
-    #[arg(long, default_value_t = false)]
-    pub verbose: bool,
 }
 
 #[cfg(test)]
@@ -52,7 +48,6 @@ mod tests {
         assert!(cli.papers.is_none());
         assert!(cli.model.is_none());
         assert!(!cli.dry_run);
-        assert!(!cli.verbose);
     }
 
     #[test]
@@ -67,7 +62,6 @@ mod tests {
         assert!(cli.papers.is_none());
         assert!(cli.model.is_none());
         assert!(!cli.dry_run);
-        assert!(!cli.verbose);
     }
 
     #[test]
@@ -94,6 +88,12 @@ mod tests {
     #[test]
     fn test_missing_files_fails() {
         let result = Cli::try_parse_from(["ocr-cli"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verbose_flag_rejected() {
+        let result = Cli::try_parse_from(["ocr-cli", "--verbose", "paper.pdf"]);
         assert!(result.is_err());
     }
 }

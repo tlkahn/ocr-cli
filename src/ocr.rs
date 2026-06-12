@@ -38,22 +38,24 @@ pub struct OcrRequest {
 // ---------- Response types ----------
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct OcrResponse {
     pub pages: Vec<OcrPage>,
+    #[allow(dead_code)] // Deserialized from Mistral API response; unused in production code.
     pub model: String,
+    #[allow(dead_code)] // Deserialized from Mistral API response; unused in production code.
     #[serde(default)]
     pub document_annotation: Option<String>,
+    #[allow(dead_code)] // Deserialized from Mistral API response; unused in production code.
     pub usage_info: OcrUsageInfo,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct OcrPage {
     pub index: u32,
     pub markdown: String,
     #[serde(default)]
     pub images: Vec<OcrImage>,
+    #[allow(dead_code)] // Deserialized from Mistral API response; unused in production code.
     #[serde(default)]
     pub dimensions: Option<OcrPageDimensions>,
 }
@@ -70,7 +72,7 @@ pub struct OcrImage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // All fields unused; struct exists to mirror Mistral API response shape.
 pub struct OcrPageDimensions {
     pub dpi: u32,
     pub height: u32,
@@ -78,7 +80,7 @@ pub struct OcrPageDimensions {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // All fields unused; struct exists to mirror Mistral API response shape.
 pub struct OcrUsageInfo {
     pub pages_processed: u32,
     #[serde(default)]

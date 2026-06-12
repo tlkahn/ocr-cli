@@ -11,6 +11,8 @@
 //! let config = Config::builder("sk-mistral-...", "sk-openai-...")
 //!     .vault_path("/path/to/vault")
 //!     .papers_path("/path/to/papers")
+//!     // `build()` consults only HOME (tilde expansion) and PDFIUM_PATH
+//!     // (fallback) from the process env -- keys are never read from env.
 //!     .build()?;
 //! let client = reqwest::Client::new();
 //! let result = process_file(

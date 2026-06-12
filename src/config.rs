@@ -74,9 +74,30 @@ const DEFAULT_PDFIUM_PATH: &str = "/opt/homebrew/lib/libpdfium.dylib";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai";
 
-/// Look up an env var via the closure, treating empty strings as absent.
+/// Return `None` when the string is empty or contains only whitespace,
+/// otherwise return `Some(s)` unchanged.
+fn non_blank(s: String) -> Option<String> {
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Return `None` when the path is empty (its `OsStr` is empty),
+/// otherwise return `Some(path)` unchanged.  Analogous to [`non_blank`]
+/// for `String` values.
+fn non_empty_path(path: PathBuf) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+/// Look up an env var via the closure, treating empty/blank strings as absent.
 fn env_non_empty(env: &impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
-    env(name).filter(|v| !v.trim().is_empty())
+    env(name).and_then(non_blank)
 }
 
 impl Config {
@@ -168,6 +189,10 @@ impl Config {
     }
 
     /// Create a [`ConfigBuilder`] with the two required API keys.
+    ///
+    /// The returned builder never reads API keys, model, or base URLs from
+    /// the process environment.  See [`ConfigBuilder::build`] for the two
+    /// env vars (`HOME`, `PDFIUM_PATH`) that *are* consulted as fallbacks.
     pub fn builder(
         mistral_api_key: impl Into<String>,
         openai_api_key: impl Into<String>,
@@ -184,7 +209,17 @@ impl Config {
         }
     }
 
-    /// Validate that required fields are non-empty.
+    /// Validate that all [`Config`] fields are non-empty.
+    ///
+    /// String fields (`mistral_api_key`, `openai_api_key`, `model`,
+    /// `openai_base_url`, `mistral_base_url`) are rejected when
+    /// `trim().is_empty()` (whitespace-only counts as empty).
+    /// PathBuf fields (`vault_path`, `papers_path`, `pdfium_path`) are
+    /// rejected when their `OsStr` representation is empty.
+    ///
+    /// Both [`ConfigBuilder::build`] and [`Config::resolve`] call this
+    /// automatically; library consumers can also call it on a manually
+    /// constructed [`Config`] for defense-in-depth.
     pub fn validate(&self) -> Result<()> {
         if self.mistral_api_key.trim().is_empty() {
             return Err(Error::Config("mistral_api_key is empty".into()));
@@ -201,11 +236,35 @@ impl Config {
         if self.mistral_base_url.trim().is_empty() {
             return Err(Error::Config("mistral_base_url is empty".into()));
         }
+        if self.vault_path.as_os_str().is_empty() {
+            return Err(Error::Config(
+                "vault_path is empty; set it via .vault_path(), --vault, or OCR_VAULT_PATH".into(),
+            ));
+        }
+        if self.papers_path.as_os_str().is_empty() {
+            return Err(Error::Config(
+                "papers_path is empty; set it via .papers_path(), --papers, or OCR_PAPERS_PATH"
+                    .into(),
+            ));
+        }
+        if self.pdfium_path.as_os_str().is_empty() {
+            return Err(Error::Config(
+                "pdfium_path is empty; set it via .pdfium_path() or PDFIUM_PATH".into(),
+            ));
+        }
         Ok(())
     }
 }
 
-/// Builder for [`Config`] that applies defaults and validates before construction.
+/// Builder for [`Config`] that accepts API keys up-front and applies
+/// compile-time defaults for all other fields.
+///
+/// **Env-var boundary:** API keys, model, and base URLs are *never* read
+/// from the process environment on this path.  Only [`build`](Self::build)
+/// consults `HOME` (for tilde expansion of default vault/papers paths)
+/// and `PDFIUM_PATH` (as a fallback when [`.pdfium_path()`](Self::pdfium_path)
+/// is not called).  In tests, the crate-internal `build_with` method
+/// accepts a fake env closure instead of touching the real environment.
 pub struct ConfigBuilder {
     mistral_api_key: String,
     openai_api_key: String,
@@ -219,41 +278,66 @@ pub struct ConfigBuilder {
 
 impl ConfigBuilder {
     pub fn model(mut self, model: impl Into<String>) -> Self {
-        let v = model.into();
-        self.model = if v.is_empty() { None } else { Some(v) };
+        self.model = non_blank(model.into());
         self
     }
 
     pub fn vault_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.vault_path = Some(path.into());
+        self.vault_path = non_empty_path(path.into());
         self
     }
 
     pub fn papers_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.papers_path = Some(path.into());
+        self.papers_path = non_empty_path(path.into());
         self
     }
 
     pub fn pdfium_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.pdfium_path = Some(path.into());
+        self.pdfium_path = non_empty_path(path.into());
         self
     }
 
     pub fn openai_base_url(mut self, url: impl Into<String>) -> Self {
-        let v = url.into();
-        self.openai_base_url = if v.is_empty() { None } else { Some(v) };
+        self.openai_base_url = non_blank(url.into());
         self
     }
 
     pub fn mistral_base_url(mut self, url: impl Into<String>) -> Self {
-        let v = url.into();
-        self.mistral_base_url = if v.is_empty() { None } else { Some(v) };
+        self.mistral_base_url = non_blank(url.into());
         self
     }
 
     /// Build the [`Config`], applying defaults for any unset optional fields.
+    ///
+    /// # Environment variables consulted
+    ///
+    /// | Variable | Used for | Fallback if absent |
+    /// |---|---|---|
+    /// | `HOME` | Tilde expansion in default `vault_path` / `papers_path` | Tilde literal preserved |
+    /// | `PDFIUM_PATH` | `pdfium_path` when [`.pdfium_path()`](Self::pdfium_path) was not called | Platform default (`/opt/homebrew/lib/libpdfium.dylib`) |
+    ///
+    /// API keys, model, `openai_base_url`, and `mistral_base_url` are **not**
+    /// read from the environment -- they come exclusively from the builder
+    /// setters or their compile-time defaults.
     pub fn build(self) -> Result<Config> {
-        let home = std::env::var("HOME").ok().filter(|v| !v.is_empty());
+        self.build_with(|name| std::env::var(name).ok())
+    }
+
+    /// Testable core: accepts a closure for env-var lookups so tests can
+    /// exercise `HOME` / `PDFIUM_PATH` resolution without mutating the
+    /// process environment.
+    #[cfg(not(test))]
+    fn build_with(self, env: impl Fn(&str) -> Option<String>) -> Result<Config> {
+        self.build_with_inner(env)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_with(self, env: impl Fn(&str) -> Option<String>) -> Result<Config> {
+        self.build_with_inner(env)
+    }
+
+    fn build_with_inner(self, env: impl Fn(&str) -> Option<String>) -> Result<Config> {
+        let home = env_non_empty(&env, "HOME");
         let home_ref = home.as_deref();
 
         let vault_raw = self
@@ -275,9 +359,7 @@ impl ConfigBuilder {
             pdfium_path: self
                 .pdfium_path
                 .or_else(|| {
-                    std::env::var("PDFIUM_PATH")
-                        .ok()
-                        .filter(|v| !v.is_empty())
+                    env_non_empty(&env, "PDFIUM_PATH")
                         .map(PathBuf::from)
                 })
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_PDFIUM_PATH)),
@@ -1177,6 +1259,288 @@ mod tests {
             expected_fields.len(),
             8,
             "expected_fields count must match the number of Config fields"
+        );
+    }
+
+    // --- non_blank helper tests ---
+
+    #[test]
+    fn test_non_blank_helper() {
+        assert_eq!(non_blank("".into()), None);
+        assert_eq!(non_blank("   ".into()), None);
+        assert_eq!(non_blank("\t\n".into()), None);
+        assert_eq!(non_blank("hello".into()), Some("hello".into()));
+        assert_eq!(
+            non_blank(" hello ".into()),
+            Some(" hello ".into()),
+            "non_blank must preserve the value, only checking blankness"
+        );
+    }
+
+    // --- builder whitespace-only handling tests ---
+
+    #[test]
+    fn test_builder_whitespace_model_uses_default() {
+        let config = Config::builder("sk-m", "sk-o")
+            .model("   ")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build()
+            .unwrap();
+        assert_eq!(config.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn test_builder_whitespace_openai_base_url_uses_default() {
+        let config = Config::builder("sk-m", "sk-o")
+            .openai_base_url("  ")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build()
+            .unwrap();
+        assert_eq!(config.openai_base_url, DEFAULT_OPENAI_BASE_URL);
+    }
+
+    #[test]
+    fn test_builder_whitespace_mistral_base_url_uses_default() {
+        let config = Config::builder("sk-m", "sk-o")
+            .mistral_base_url("\t ")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build()
+            .unwrap();
+        assert_eq!(config.mistral_base_url, DEFAULT_MISTRAL_BASE_URL);
+    }
+
+    // --- non_empty_path helper tests ---
+
+    #[test]
+    fn test_non_empty_path_helper() {
+        assert_eq!(non_empty_path(PathBuf::from("")), None);
+        assert_eq!(
+            non_empty_path(PathBuf::from("/foo")),
+            Some(PathBuf::from("/foo"))
+        );
+    }
+
+    // --- builder empty PathBuf setter tests ---
+
+    #[test]
+    fn test_builder_empty_vault_path_uses_default() {
+        let config = Config::builder("sk-m", "sk-o")
+            .vault_path("")
+            .papers_path("/p")
+            .build()
+            .unwrap();
+        // An empty vault_path must fall through to the default, not be an empty PathBuf.
+        assert_ne!(
+            config.vault_path,
+            PathBuf::from(""),
+            "empty vault_path must not survive into the built Config"
+        );
+    }
+
+    #[test]
+    fn test_builder_empty_papers_path_uses_default() {
+        let config = Config::builder("sk-m", "sk-o")
+            .vault_path("/v")
+            .papers_path("")
+            .build()
+            .unwrap();
+        assert_ne!(
+            config.papers_path,
+            PathBuf::from(""),
+            "empty papers_path must not survive into the built Config"
+        );
+    }
+
+    #[test]
+    fn test_builder_empty_pdfium_path_uses_default() {
+        let config = Config::builder("sk-m", "sk-o")
+            .pdfium_path("")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.pdfium_path,
+            PathBuf::from(DEFAULT_PDFIUM_PATH),
+            "empty pdfium_path must fall through to the default"
+        );
+    }
+
+    // --- validate defense-in-depth for PathBuf fields ---
+
+    #[test]
+    fn test_validate_rejects_empty_vault_path() {
+        let config = Config {
+            mistral_api_key: "sk-m".into(),
+            openai_api_key: "sk-o".into(),
+            model: DEFAULT_MODEL.into(),
+            vault_path: PathBuf::from(""),
+            papers_path: PathBuf::from("/p"),
+            pdfium_path: PathBuf::from(DEFAULT_PDFIUM_PATH),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.into(),
+            mistral_base_url: DEFAULT_MISTRAL_BASE_URL.into(),
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("vault_path"),
+            "error should mention 'vault_path', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_papers_path() {
+        let config = Config {
+            mistral_api_key: "sk-m".into(),
+            openai_api_key: "sk-o".into(),
+            model: DEFAULT_MODEL.into(),
+            vault_path: PathBuf::from("/v"),
+            papers_path: PathBuf::from(""),
+            pdfium_path: PathBuf::from(DEFAULT_PDFIUM_PATH),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.into(),
+            mistral_base_url: DEFAULT_MISTRAL_BASE_URL.into(),
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("papers_path"),
+            "error should mention 'papers_path', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_pdfium_path() {
+        let config = Config {
+            mistral_api_key: "sk-m".into(),
+            openai_api_key: "sk-o".into(),
+            model: DEFAULT_MODEL.into(),
+            vault_path: PathBuf::from("/v"),
+            papers_path: PathBuf::from("/p"),
+            pdfium_path: PathBuf::from(""),
+            openai_base_url: DEFAULT_OPENAI_BASE_URL.into(),
+            mistral_base_url: DEFAULT_MISTRAL_BASE_URL.into(),
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("pdfium_path"),
+            "error should mention 'pdfium_path', got: {err}"
+        );
+    }
+
+    // --- build_with injectable-env tests ---
+
+    #[test]
+    fn test_builder_pdfium_path_from_env_closure() {
+        let config = Config::builder("sk-m", "sk-o")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build_with(|name| match name {
+                "PDFIUM_PATH" => Some("/usr/lib/libpdfium.so".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            config.pdfium_path,
+            PathBuf::from("/usr/lib/libpdfium.so"),
+            "builder should use PDFIUM_PATH from env closure when .pdfium_path() is not called"
+        );
+    }
+
+    #[test]
+    fn test_builder_explicit_pdfium_overrides_env_closure() {
+        let config = Config::builder("sk-m", "sk-o")
+            .vault_path("/v")
+            .papers_path("/p")
+            .pdfium_path("/explicit/libpdfium.so")
+            .build_with(|name| match name {
+                "PDFIUM_PATH" => Some("/env/libpdfium.so".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            config.pdfium_path,
+            PathBuf::from("/explicit/libpdfium.so"),
+            "explicit .pdfium_path() must override PDFIUM_PATH from env closure"
+        );
+    }
+
+    #[test]
+    fn test_builder_empty_pdfium_env_uses_default_closure() {
+        let config = Config::builder("sk-m", "sk-o")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build_with(|name| match name {
+                "PDFIUM_PATH" => Some("".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            config.pdfium_path,
+            PathBuf::from(DEFAULT_PDFIUM_PATH),
+            "empty PDFIUM_PATH in env closure should fall back to default"
+        );
+    }
+
+    #[test]
+    fn test_builder_whitespace_home_treated_as_absent() {
+        let config = Config::builder("sk-m", "sk-o")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build_with(|name| match name {
+                "HOME" => Some("  ".into()),
+                _ => None,
+            })
+            .unwrap();
+        // With whitespace-only HOME, vault_path and papers_path keep their
+        // explicit values (no tilde expansion needed here since they are
+        // absolute).  The key invariant is that build_with does not crash
+        // and treats whitespace HOME the same as absent HOME.
+        assert_eq!(config.vault_path, PathBuf::from("/v"));
+        assert_eq!(config.papers_path, PathBuf::from("/p"));
+    }
+
+    #[test]
+    fn test_builder_whitespace_home_preserves_tilde_default() {
+        // When no explicit vault/papers paths are set, the defaults contain
+        // tildes.  With whitespace-only HOME (treated as absent), expand_tilde
+        // must leave the tilde intact rather than producing a relative path.
+        let config = Config::builder("sk-m", "sk-o")
+            .build_with(|name| match name {
+                "HOME" => Some("  ".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            config.vault_path,
+            PathBuf::from(DEFAULT_VAULT),
+            "whitespace HOME must be treated as absent; tilde default preserved"
+        );
+        assert_eq!(
+            config.papers_path,
+            PathBuf::from(DEFAULT_PAPERS),
+            "whitespace HOME must be treated as absent; tilde default preserved"
+        );
+    }
+
+    #[test]
+    fn test_builder_whitespace_pdfium_env_treated_as_absent() {
+        let config = Config::builder("sk-m", "sk-o")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build_with(|name| match name {
+                "PDFIUM_PATH" => Some("  ".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            config.pdfium_path,
+            PathBuf::from(DEFAULT_PDFIUM_PATH),
+            "whitespace-only PDFIUM_PATH in env closure should be treated as absent"
         );
     }
 

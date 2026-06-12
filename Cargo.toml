@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = ["rsproxy-sparse"]
 
+[lib]
+name = "ocr_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ocr-cli"
+path = "src/main.rs"
+
 [dependencies]
 lmpdf = { path = "../lmpdf/crates/lmpdf" }
 llm-core = { path = "../llm-rs/crates/llm-core" }

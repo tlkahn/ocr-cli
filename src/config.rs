@@ -1,5 +1,3 @@
-// Resolved configuration for the OCR pipeline.
-
 use std::path::PathBuf;
 
 use crate::cli::Cli;
@@ -16,6 +14,14 @@ pub struct Config {
     pub pdfium_path: PathBuf,
     pub openai_base_url: String,
     pub mistral_base_url: String,
+}
+
+/// Overrides for library consumers who don't have a `Cli`.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigOverrides {
+    pub vault_path: Option<PathBuf>,
+    pub papers_path: Option<PathBuf>,
+    pub model: Option<String>,
 }
 
 /// Default values for optional CLI flags.
@@ -36,8 +42,50 @@ impl Config {
         Self::resolve_with(cli, |name| std::env::var(name).ok())
     }
 
+    /// Resolve configuration from environment variables with explicit overrides.
+    /// Same resolution order as `resolve` but accepts `ConfigOverrides` instead of `Cli`.
+    pub fn from_env(overrides: &ConfigOverrides) -> Result<Self> {
+        Self::from_env_with(overrides, |name| std::env::var(name).ok())
+    }
+
     /// Testable core: accepts a closure for env var lookups.
     fn resolve_with(cli: &Cli, env: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::resolve_inner(
+            cli.vault
+                .clone()
+                .map(|p| p.to_string_lossy().into_owned()),
+            cli.papers
+                .clone()
+                .map(|p| p.to_string_lossy().into_owned()),
+            cli.model.clone(),
+            env,
+        )
+    }
+
+    fn from_env_with(
+        overrides: &ConfigOverrides,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
+        Self::resolve_inner(
+            overrides
+                .vault_path
+                .clone()
+                .map(|p| p.to_string_lossy().into_owned()),
+            overrides
+                .papers_path
+                .clone()
+                .map(|p| p.to_string_lossy().into_owned()),
+            overrides.model.clone(),
+            env,
+        )
+    }
+
+    fn resolve_inner(
+        vault_override: Option<String>,
+        papers_override: Option<String>,
+        model_override: Option<String>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
         let mistral_api_key = env_non_empty(&env, "MISTRAL_API_KEY")
             .ok_or_else(|| Error::Config("MISTRAL_API_KEY not set".into()))?;
         let openai_api_key = env_non_empty(&env, "OPENAI_API_KEY")
@@ -46,37 +94,24 @@ impl Config {
         let home = env_non_empty(&env, "HOME");
         let home_ref = home.as_deref();
 
-        // Vault path: CLI flag (Some) -> env var -> default (with tilde expansion).
-        let vault_raw = cli
-            .vault
-            .clone()
-            .map(|p| p.to_string_lossy().into_owned())
+        let vault_raw = vault_override
             .or_else(|| env_non_empty(&env, "OCR_VAULT_PATH"))
             .unwrap_or_else(|| DEFAULT_VAULT.to_string());
         let vault_path = expand_tilde(std::path::Path::new(&vault_raw), home_ref);
 
-        // Papers path: CLI flag (Some) -> env var -> default (with tilde expansion).
-        let papers_raw = cli
-            .papers
-            .clone()
-            .map(|p| p.to_string_lossy().into_owned())
+        let papers_raw = papers_override
             .or_else(|| env_non_empty(&env, "OCR_PAPERS_PATH"))
             .unwrap_or_else(|| DEFAULT_PAPERS.to_string());
         let papers_path = expand_tilde(std::path::Path::new(&papers_raw), home_ref);
 
-        // Model: CLI flag (Some) -> env var -> default.
-        let model = cli
-            .model
-            .clone()
+        let model = model_override
             .or_else(|| env_non_empty(&env, "LLM_DEFAULT_MODEL"))
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-        // Pdfium path: env var -> default.
         let pdfium_path = env_non_empty(&env, "PDFIUM_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/opt/homebrew/lib/libpdfium.dylib"));
 
-        // Base URLs: env var -> hardcoded default.
         let openai_base_url = env_non_empty(&env, "OPENAI_BASE_URL")
             .unwrap_or_else(|| "https://api.openai.com".to_string());
         let mistral_base_url = env_non_empty(&env, "MISTRAL_BASE_URL")
@@ -423,7 +458,6 @@ mod tests {
 
     #[test]
     fn test_resolve_signature_exists() {
-        // Compile-check only: verify the public API signature exists.
         let _: fn(&Cli) -> Result<Config> = Config::resolve;
     }
 
@@ -447,7 +481,6 @@ mod tests {
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
-        // CLI flag should win even when its value equals the default.
         assert_eq!(
             config.vault_path,
             PathBuf::from("/fakehome/Documents/Ekuro/")
@@ -468,7 +501,6 @@ mod tests {
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
-        // CLI flag should win even when its value equals the default.
         assert_eq!(
             config.papers_path,
             PathBuf::from("/fakehome/Documents/Papers/")
@@ -488,7 +520,6 @@ mod tests {
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
-        // CLI flag should win even when its value equals the default.
         assert_eq!(config.model, "gpt-4o-mini");
     }
 
@@ -507,5 +538,90 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, Error::Config(_)));
         assert!(err.to_string().contains("MISTRAL_API_KEY"));
+    }
+
+    // --- from_env tests ---
+
+    #[test]
+    fn test_from_env_with_defaults() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let config = Config::from_env_with(&ConfigOverrides::default(), env).unwrap();
+        assert_eq!(config.model, "gpt-4o-mini");
+        assert_eq!(
+            config.vault_path,
+            PathBuf::from("/fakehome/Documents/Ekuro/")
+        );
+        assert_eq!(
+            config.papers_path,
+            PathBuf::from("/fakehome/Documents/Papers/")
+        );
+    }
+
+    #[test]
+    fn test_from_env_with_overrides() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let overrides = ConfigOverrides {
+            vault_path: Some(PathBuf::from("/custom/vault")),
+            papers_path: Some(PathBuf::from("/custom/papers")),
+            model: Some("gpt-4o".into()),
+        };
+        let config = Config::from_env_with(&overrides, env).unwrap();
+        assert_eq!(config.vault_path, PathBuf::from("/custom/vault"));
+        assert_eq!(config.papers_path, PathBuf::from("/custom/papers"));
+        assert_eq!(config.model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_from_env_overrides_with_tilde() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                "HOME" => Some("/fakehome".into()),
+                _ => None,
+            }
+        };
+        let overrides = ConfigOverrides {
+            vault_path: Some(PathBuf::from("~/my-vault")),
+            papers_path: None,
+            model: None,
+        };
+        let config = Config::from_env_with(&overrides, env).unwrap();
+        assert_eq!(config.vault_path, PathBuf::from("/fakehome/my-vault"));
+    }
+
+    #[test]
+    fn test_from_env_missing_api_key() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "OPENAI_API_KEY" => Some("sk-openai".into()),
+                _ => None,
+            }
+        };
+        let result = Config::from_env_with(&ConfigOverrides::default(), env);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("MISTRAL_API_KEY"));
+    }
+
+    #[test]
+    fn test_from_env_signature_exists() {
+        let _: fn(&ConfigOverrides) -> Result<Config> = Config::from_env;
     }
 }

@@ -1,15 +1,6 @@
-mod cli;
-mod config;
-mod error;
-mod ocr;
-mod pipeline;
-mod postproc;
-mod title;
-mod truncate;
-
 use clap::Parser;
-use cli::Cli;
-use config::Config;
+use ocr_cli::cli::Cli;
+use ocr_cli::config::Config;
 
 #[tokio::main]
 async fn main() {
@@ -22,7 +13,7 @@ async fn main() {
         }
     };
 
-    let results = pipeline::process_batch(&cli, &config).await;
+    let results = ocr_cli::pipeline::process_batch(&cli, &config).await;
 
     let total = results.len();
     let fail_count = results.iter().filter(|(_, r)| r.is_err()).count();

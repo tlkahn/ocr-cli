@@ -1,11 +1,28 @@
-// Pipeline orchestration: process PDF files through 5 steps.
-
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::error::Result;
+use crate::progress::{Progress, Step, StderrProgress};
+
+/// Clap-free options for driving the pipeline from library code.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    pub lead: usize,
+    pub trail: usize,
+    pub dry_run: bool,
+}
+
+impl From<&Cli> for Options {
+    fn from(cli: &Cli) -> Self {
+        Options {
+            lead: cli.lead,
+            trail: cli.trail,
+            dry_run: cli.dry_run,
+        }
+    }
+}
 
 /// Outcome of successfully processing a single file.
 #[derive(Debug)]
@@ -33,12 +50,34 @@ pub fn output_paths(title: &str, vault: &Path, papers: &Path) -> (PathBuf, PathB
     (md, pdf, images)
 }
 
+/// Wraps either a borrowed `&Pdfium` (caller-owned) or a lazily-initialised
+/// `OnceLock<Pdfium>` so that both library and CLI callers can share one instance.
+pub(crate) enum PdfiumHandle<'a> {
+    Borrowed(&'a lmpdf::Pdfium),
+    Lazy(&'a OnceLock<lmpdf::Pdfium>),
+}
+
+impl<'a> PdfiumHandle<'a> {
+    pub(crate) fn get_or_init(&self, pdfium_path: &Path) -> Result<&'a lmpdf::Pdfium> {
+        match *self {
+            PdfiumHandle::Borrowed(p) => Ok(p),
+            PdfiumHandle::Lazy(lock) => {
+                if lock.get().is_none() {
+                    let p = lmpdf::Pdfium::open(pdfium_path)?;
+                    let _ = lock.set(p);
+                }
+                Ok(lock.get().expect("pdfium initialized above"))
+            }
+        }
+    }
+}
+
 /// Trait for extracting page text from PDF bytes (testability seam).
 pub(crate) trait PageTextFn {
     fn page_text(
         &self,
         pdf_bytes: &[u8],
-        pdfium: &OnceLock<lmpdf::Pdfium>,
+        pdfium: &PdfiumHandle<'_>,
         pdfium_path: &Path,
     ) -> Result<String>;
 }
@@ -50,14 +89,10 @@ impl PageTextFn for DefaultPageText {
     fn page_text(
         &self,
         pdf_bytes: &[u8],
-        pdfium: &OnceLock<lmpdf::Pdfium>,
+        pdfium: &PdfiumHandle<'_>,
         pdfium_path: &Path,
     ) -> Result<String> {
-        if pdfium.get().is_none() {
-            let p = lmpdf::Pdfium::open(pdfium_path)?;
-            let _ = pdfium.set(p);
-        }
-        let pdfium = pdfium.get().expect("pdfium initialised above");
+        let pdfium = pdfium.get_or_init(pdfium_path)?;
         let doc = pdfium.load_document(pdf_bytes, None)?;
         doc.page_text(0).map_err(Into::into)
     }
@@ -66,21 +101,27 @@ impl PageTextFn for DefaultPageText {
 /// Testable inner implementation with injectable page_text trait and base URLs from config.
 pub(crate) async fn process_file_inner(
     input: &Path,
-    cli: &Cli,
+    options: &Options,
     config: &Config,
     client: &reqwest::Client,
     page_text_fn: &dyn PageTextFn,
-    pdfium: &OnceLock<lmpdf::Pdfium>,
+    pdfium: &PdfiumHandle<'_>,
+    progress: &dyn Progress,
 ) -> Result<Option<ProcessResult>> {
     let filename = input.file_name().unwrap_or_default().to_string_lossy();
 
     // Step 1: Truncate
-    eprintln!("[1/5] Truncating {filename}...");
-    let pdf_bytes =
-        crate::truncate::truncate_pdf(input, cli.lead, cli.trail, pdfium, &config.pdfium_path)?;
+    progress.on_step(Step::Truncate, &filename);
+    let pdf_bytes = crate::truncate::truncate_pdf(
+        input,
+        options.lead,
+        options.trail,
+        pdfium,
+        &config.pdfium_path,
+    )?;
 
     // Step 2: Extract title
-    eprintln!("[2/5] Extracting title...");
+    progress.on_step(Step::ExtractTitle, "");
     let page_text = page_text_fn.page_text(&pdf_bytes, pdfium, &config.pdfium_path)?;
     let title = crate::title::extract_title(
         &page_text,
@@ -90,17 +131,15 @@ pub(crate) async fn process_file_inner(
     )
     .await?;
 
-    if cli.dry_run {
+    if options.dry_run {
         let title = deduplicate_title(&title, &config.vault_path, &config.papers_path);
         let (md, pdf, _img) = output_paths(&title, &config.vault_path, &config.papers_path);
-        eprintln!("[dry-run] Proposed filename: {title}");
-        eprintln!("[dry-run]   markdown: {}", md.display());
-        eprintln!("[dry-run]   pdf:      {}", pdf.display());
+        progress.on_dry_run(&title, &md, &pdf);
         return Ok(None);
     }
 
     // Step 3: Mistral OCR
-    eprintln!("[3/5] Running OCR...");
+    progress.on_step(Step::Ocr, "");
     let ocr_response = crate::ocr::ocr_pdf(
         client,
         &config.mistral_base_url,
@@ -111,14 +150,14 @@ pub(crate) async fn process_file_inner(
     .await?;
 
     // Step 4: Post-process
-    eprintln!("[4/5] Post-processing...");
+    progress.on_step(Step::PostProcess, "");
     let title = deduplicate_title(&title, &config.vault_path, &config.papers_path);
     let (md_path, pdf_path, images_dir) =
         output_paths(&title, &config.vault_path, &config.papers_path);
     let output = crate::postproc::postprocess(&ocr_response.pages, &images_dir, &title)?;
 
     // Step 5: Move outputs
-    eprintln!("[5/5] Writing outputs...");
+    progress.on_step(Step::WriteOutputs, "");
     if let Some(parent) = md_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -146,13 +185,34 @@ pub(crate) async fn process_file_inner(
     }))
 }
 
+/// Process a single PDF file through the full pipeline.
+///
+/// Pass a pre-loaded `pdfium` instance to share it across calls, or `None`
+/// to let this function initialise one lazily.
+pub async fn process_file(
+    input: &Path,
+    options: &Options,
+    config: &Config,
+    client: &reqwest::Client,
+    pdfium: Option<&lmpdf::Pdfium>,
+    progress: &dyn Progress,
+) -> Result<Option<ProcessResult>> {
+    let lock = OnceLock::new();
+    let handle = match pdfium {
+        Some(p) => PdfiumHandle::Borrowed(p),
+        None => PdfiumHandle::Lazy(&lock),
+    };
+    process_file_inner(input, options, config, client, &DefaultPageText, &handle, progress).await
+}
+
 /// Process all files in batch mode. Continues past individual failures.
 /// Returns a vec of (path, result) pairs.
 pub async fn process_batch(
     cli: &Cli,
     config: &Config,
 ) -> Vec<(PathBuf, Result<Option<ProcessResult>>)> {
-    process_batch_inner(cli, config, &DefaultPageText).await
+    let options = Options::from(cli);
+    process_batch_inner(&cli.files, &options, config, &DefaultPageText, &StderrProgress).await
 }
 
 /// Testable batch processing with injectable page_text trait.
@@ -160,18 +220,23 @@ pub async fn process_batch(
 /// A single `OnceLock<lmpdf::Pdfium>` is created here and shared across
 /// all files in the batch, so the library is loaded at most once.
 pub(crate) async fn process_batch_inner(
-    cli: &Cli,
+    files: &[PathBuf],
+    options: &Options,
     config: &Config,
     page_text_fn: &dyn PageTextFn,
+    progress: &dyn Progress,
 ) -> Vec<(PathBuf, Result<Option<ProcessResult>>)> {
     let client = reqwest::Client::new();
     let pdfium = OnceLock::new();
+    let handle = PdfiumHandle::Lazy(&pdfium);
     let mut results = Vec::new();
-    for path in &cli.files {
-        eprintln!("\n=== Processing: {} ===", path.display());
-        let result = process_file_inner(path, cli, config, &client, page_text_fn, &pdfium).await;
+    for path in files {
+        progress.on_file_start(path);
+        let result =
+            process_file_inner(path, options, config, &client, page_text_fn, &handle, progress)
+                .await;
         if let Err(ref e) = result {
-            eprintln!("ERROR processing {}: {e}", path.display());
+            progress.on_error(path, e);
         }
         results.push((path.clone(), result));
     }
@@ -225,6 +290,7 @@ fn move_file(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress::NoopProgress;
 
     #[test]
     fn test_move_file_same_device() {
@@ -301,7 +367,7 @@ mod tests {
         fn page_text(
             &self,
             _pdf_bytes: &[u8],
-            _pdfium: &OnceLock<lmpdf::Pdfium>,
+            _pdfium: &PdfiumHandle<'_>,
             _pdfium_path: &Path,
         ) -> crate::error::Result<String> {
             Ok("fake page text for title extraction".into())
@@ -361,15 +427,10 @@ mod tests {
         let vault = tmp.path().join("vault");
         let papers = tmp.path().join("papers");
 
-        let cli = crate::cli::Cli {
-            files: vec![input_pdf.clone()],
+        let options = Options {
             lead: 0,
             trail: 0,
-            vault: Some(vault.clone()),
-            papers: Some(papers.clone()),
-            model: Some("gpt-4o-mini".into()),
             dry_run: true,
-            verbose: false,
         };
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
@@ -384,8 +445,17 @@ mod tests {
         let client = reqwest::Client::new();
 
         let pdfium = OnceLock::new();
-        let result =
-            process_file_inner(&input_pdf, &cli, &config, &client, &MockPageText, &pdfium).await;
+        let handle = PdfiumHandle::Lazy(&pdfium);
+        let result = process_file_inner(
+            &input_pdf,
+            &options,
+            &config,
+            &client,
+            &MockPageText,
+            &handle,
+            &NoopProgress,
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -485,15 +555,10 @@ mod tests {
         let vault = tmp.path().join("vault");
         let papers = tmp.path().join("papers");
 
-        let cli = crate::cli::Cli {
-            files: vec![input_pdf.clone()],
+        let options = Options {
             lead: 0,
             trail: 0,
-            vault: Some(vault.clone()),
-            papers: Some(papers.clone()),
-            model: Some("gpt-4o-mini".into()),
             dry_run: false,
-            verbose: false,
         };
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
@@ -508,8 +573,17 @@ mod tests {
         let client = reqwest::Client::new();
 
         let pdfium = OnceLock::new();
-        let result =
-            process_file_inner(&input_pdf, &cli, &config, &client, &MockPageText, &pdfium).await;
+        let handle = PdfiumHandle::Lazy(&pdfium);
+        let result = process_file_inner(
+            &input_pdf,
+            &options,
+            &config,
+            &client,
+            &MockPageText,
+            &handle,
+            &NoopProgress,
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -603,15 +677,11 @@ mod tests {
         let vault = tmp.path().join("vault");
         let papers = tmp.path().join("papers");
 
-        let cli = crate::cli::Cli {
-            files: vec![valid1.clone(), missing.clone(), valid2.clone()],
+        let files = vec![valid1.clone(), missing.clone(), valid2.clone()];
+        let options = Options {
             lead: 0,
             trail: 0,
-            vault: Some(vault.clone()),
-            papers: Some(papers.clone()),
-            model: Some("gpt-4o-mini".into()),
-            dry_run: true, // Use dry-run so we don't need OCR mock.
-            verbose: false,
+            dry_run: true,
         };
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
@@ -624,7 +694,8 @@ mod tests {
             mistral_base_url: mock_server.uri(),
         };
 
-        let results = process_batch_inner(&cli, &config, &MockPageText).await;
+        let results =
+            process_batch_inner(&files, &options, &config, &MockPageText, &NoopProgress).await;
 
         assert_eq!(results.len(), 3, "should have results for all 3 files");
 
@@ -803,15 +874,11 @@ mod tests {
         let vault = tmp.path().join("vault");
         let papers = tmp.path().join("papers");
 
-        let cli = crate::cli::Cli {
-            files: vec![pdf1.clone(), pdf2.clone()],
+        let files = vec![pdf1.clone(), pdf2.clone()];
+        let options = Options {
             lead: 0,
             trail: 0,
-            vault: Some(vault.clone()),
-            papers: Some(papers.clone()),
-            model: Some("gpt-4o-mini".into()),
             dry_run: false,
-            verbose: false,
         };
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
@@ -824,7 +891,8 @@ mod tests {
             mistral_base_url: mock_server.uri(),
         };
 
-        let results = process_batch_inner(&cli, &config, &MockPageText).await;
+        let results =
+            process_batch_inner(&files, &options, &config, &MockPageText, &NoopProgress).await;
 
         assert_eq!(results.len(), 2, "should have results for both files");
 
@@ -929,5 +997,31 @@ mod tests {
 
         let result = deduplicate_title("paper", &vault, &papers);
         assert_eq!(result, "paper-4");
+    }
+
+    #[test]
+    fn test_options_default() {
+        let opts = Options::default();
+        assert_eq!(opts.lead, 0);
+        assert_eq!(opts.trail, 0);
+        assert!(!opts.dry_run);
+    }
+
+    #[test]
+    fn test_options_from_cli() {
+        let cli = crate::cli::Cli {
+            files: vec![PathBuf::from("test.pdf")],
+            lead: 2,
+            trail: 3,
+            vault: Some(PathBuf::from("/vault")),
+            papers: Some(PathBuf::from("/papers")),
+            model: Some("gpt-4o".into()),
+            dry_run: true,
+            verbose: false,
+        };
+        let opts = Options::from(&cli);
+        assert_eq!(opts.lead, 2);
+        assert_eq!(opts.trail, 3);
+        assert!(opts.dry_run);
     }
 }

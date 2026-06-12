@@ -38,6 +38,7 @@ pub struct OcrRequest {
 // ---------- Response types ----------
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct OcrResponse {
     pub pages: Vec<OcrPage>,
     pub model: String,
@@ -47,6 +48,7 @@ pub struct OcrResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct OcrPage {
     pub index: u32,
     pub markdown: String,
@@ -68,6 +70,7 @@ pub struct OcrImage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct OcrPageDimensions {
     pub dpi: u32,
     pub height: u32,
@@ -75,6 +78,7 @@ pub struct OcrPageDimensions {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct OcrUsageInfo {
     pub pages_processed: u32,
     #[serde(default)]

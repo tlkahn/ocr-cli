@@ -22,16 +22,21 @@
 //! # }
 //! ```
 //!
-//! **Note:** `process_file` is `async` and performs blocking PDF I/O internally.
-//! In Tauri or other GUI runtimes, call it from a background task (e.g.
-//! `tokio::task::spawn_blocking`) to avoid blocking the main thread.
+//! **Note:** `process_file` is an `async fn` that internally awaits network
+//! calls (title extraction via OpenAI, OCR via Mistral) and performs some
+//! synchronous pdfium + `std::fs` work. Drive it on the async runtime --
+//! e.g. `tokio::spawn` or `tauri::async_runtime::spawn` -- rather than
+//! `tokio::task::spawn_blocking` (which takes a sync closure and cannot
+//! `.await`). If the synchronous pdfium steps prove costly, offload only
+//! those via `spawn_blocking` inside the future.
 
+#[doc(hidden)]
 pub mod cli;
 pub mod config;
 pub mod error;
-pub mod ocr;
+pub(crate) mod ocr;
 pub mod pipeline;
-pub mod postproc;
+pub(crate) mod postproc;
 pub mod progress;
-pub mod title;
-pub mod truncate;
+pub(crate) mod title;
+pub(crate) mod truncate;

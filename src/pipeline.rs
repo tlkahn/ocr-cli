@@ -1133,4 +1133,90 @@ mod tests {
         assert_eq!(opts.trail, 3);
         assert!(opts.dry_run);
     }
+
+    #[tokio::test]
+    async fn test_builder_config_drives_pipeline() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        let title_body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "builder-pipeline-test-2024"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_json(&title_body),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/ocr"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_pdf = tmp.path().join("test.pdf");
+        std::fs::write(&input_pdf, b"%PDF-fake").unwrap();
+        let vault = tmp.path().join("vault");
+        let papers = tmp.path().join("papers");
+
+        let config = crate::config::Config::builder("sk-mistral-from-builder", "sk-openai-from-builder")
+            .vault_path(&vault)
+            .papers_path(&papers)
+            .pdfium_path("/nonexistent/libpdfium.dylib")
+            .openai_base_url(mock_server.uri())
+            .mistral_base_url(mock_server.uri())
+            .build()
+            .unwrap();
+
+        let options = Options {
+            lead: 0,
+            trail: 0,
+            dry_run: true,
+        };
+        let client = reqwest::Client::new();
+        let handle = PdfiumHandle::Lazy(OnceLock::new());
+        let result = process_file_inner(
+            &input_pdf,
+            &options,
+            &config,
+            &client,
+            &MockPageText,
+            &handle,
+            &NoopProgress,
+        )
+        .await;
+
+        assert!(result.is_ok(), "builder-constructed config should work: {result:?}");
+        match result.unwrap() {
+            ProcessOutcome::DryRun { title, .. } => {
+                assert_eq!(title, "builder-pipeline-test-2024");
+            }
+            ProcessOutcome::Written(_) => panic!("expected DryRun"),
+        }
+    }
 }

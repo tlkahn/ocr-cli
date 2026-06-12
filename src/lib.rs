@@ -1,6 +1,31 @@
 //! Local-first OCR pipeline for academic PDFs.
 //!
-//! # Example
+//! # Example (builder -- programmatic keys)
+//!
+//! ```rust,no_run
+//! use ocr_cli::config::Config;
+//! use ocr_cli::pipeline::{Options, process_file};
+//! use ocr_cli::progress::NoopProgress;
+//!
+//! # async fn run() -> ocr_cli::error::Result<()> {
+//! let config = Config::builder("sk-mistral-...", "sk-openai-...")
+//!     .vault_path("/path/to/vault")
+//!     .papers_path("/path/to/papers")
+//!     .build()?;
+//! let client = reqwest::Client::new();
+//! let result = process_file(
+//!     std::path::Path::new("paper.pdf"),
+//!     &Options::default(),
+//!     &config,
+//!     &client,
+//!     None,
+//!     &NoopProgress,
+//! ).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Example (from environment)
 //!
 //! ```rust,no_run
 //! use ocr_cli::config::{Config, ConfigOverrides};

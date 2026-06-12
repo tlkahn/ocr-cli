@@ -1,10 +1,12 @@
+use std::fmt;
 use std::path::PathBuf;
 
 use crate::cli::Cli;
 use crate::error::{Error, Result};
 
 /// Resolved configuration for the OCR pipeline.
-#[derive(Debug, Clone)]
+#[non_exhaustive]
+#[derive(Clone)]
 pub struct Config {
     pub mistral_api_key: String,
     pub openai_api_key: String,
@@ -14,6 +16,21 @@ pub struct Config {
     pub pdfium_path: PathBuf,
     pub openai_base_url: String,
     pub mistral_base_url: String,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("mistral_api_key", &"[REDACTED]")
+            .field("openai_api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("vault_path", &self.vault_path)
+            .field("papers_path", &self.papers_path)
+            .field("pdfium_path", &self.pdfium_path)
+            .field("openai_base_url", &self.openai_base_url)
+            .field("mistral_base_url", &self.mistral_base_url)
+            .finish()
+    }
 }
 
 /// Overrides for library consumers who don't have a `Cli`.
@@ -128,6 +145,110 @@ impl Config {
             openai_base_url,
             mistral_base_url,
         })
+    }
+
+    /// Create a [`ConfigBuilder`] with the two required API keys.
+    pub fn builder(
+        mistral_api_key: impl Into<String>,
+        openai_api_key: impl Into<String>,
+    ) -> ConfigBuilder {
+        ConfigBuilder {
+            mistral_api_key: mistral_api_key.into(),
+            openai_api_key: openai_api_key.into(),
+            model: None,
+            vault_path: None,
+            papers_path: None,
+            pdfium_path: None,
+            openai_base_url: None,
+            mistral_base_url: None,
+        }
+    }
+
+    /// Validate that required fields are non-empty.
+    pub fn validate(&self) -> Result<()> {
+        if self.mistral_api_key.is_empty() {
+            return Err(Error::Config("mistral_api_key is empty".into()));
+        }
+        if self.openai_api_key.is_empty() {
+            return Err(Error::Config("openai_api_key is empty".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Builder for [`Config`] that applies defaults and validates before construction.
+pub struct ConfigBuilder {
+    mistral_api_key: String,
+    openai_api_key: String,
+    model: Option<String>,
+    vault_path: Option<PathBuf>,
+    papers_path: Option<PathBuf>,
+    pdfium_path: Option<PathBuf>,
+    openai_base_url: Option<String>,
+    mistral_base_url: Option<String>,
+}
+
+impl ConfigBuilder {
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn vault_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.vault_path = Some(path.into());
+        self
+    }
+
+    pub fn papers_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.papers_path = Some(path.into());
+        self
+    }
+
+    pub fn pdfium_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.pdfium_path = Some(path.into());
+        self
+    }
+
+    pub fn openai_base_url(mut self, url: impl Into<String>) -> Self {
+        self.openai_base_url = Some(url.into());
+        self
+    }
+
+    pub fn mistral_base_url(mut self, url: impl Into<String>) -> Self {
+        self.mistral_base_url = Some(url.into());
+        self
+    }
+
+    /// Build the [`Config`], applying defaults for any unset optional fields.
+    pub fn build(self) -> Result<Config> {
+        let home = std::env::var("HOME").ok();
+        let home_ref = home.as_deref();
+
+        let vault_path = self.vault_path.unwrap_or_else(|| {
+            expand_tilde(std::path::Path::new(DEFAULT_VAULT), home_ref)
+        });
+        let papers_path = self.papers_path.unwrap_or_else(|| {
+            expand_tilde(std::path::Path::new(DEFAULT_PAPERS), home_ref)
+        });
+
+        let config = Config {
+            mistral_api_key: self.mistral_api_key,
+            openai_api_key: self.openai_api_key,
+            model: self.model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            vault_path,
+            papers_path,
+            pdfium_path: self
+                .pdfium_path
+                .unwrap_or_else(|| PathBuf::from("/opt/homebrew/lib/libpdfium.dylib")),
+            openai_base_url: self
+                .openai_base_url
+                .unwrap_or_else(|| "https://api.openai.com".to_string()),
+            mistral_base_url: self
+                .mistral_base_url
+                .unwrap_or_else(|| "https://api.mistral.ai".to_string()),
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
@@ -584,5 +705,133 @@ mod tests {
         assert_eq!(via_cli.pdfium_path, via_overrides.pdfium_path);
         assert_eq!(via_cli.openai_base_url, via_overrides.openai_base_url);
         assert_eq!(via_cli.mistral_base_url, via_overrides.mistral_base_url);
+    }
+
+    // --- builder tests ---
+
+    #[test]
+    fn test_builder_defaults() {
+        let config = Config::builder("sk-mistral", "sk-openai")
+            .vault_path("/explicit/vault")
+            .papers_path("/explicit/papers")
+            .build()
+            .unwrap();
+        assert_eq!(config.mistral_api_key, "sk-mistral");
+        assert_eq!(config.openai_api_key, "sk-openai");
+        assert_eq!(config.model, "gpt-4o-mini");
+        assert_eq!(config.vault_path, PathBuf::from("/explicit/vault"));
+        assert_eq!(config.papers_path, PathBuf::from("/explicit/papers"));
+        assert_eq!(
+            config.pdfium_path,
+            PathBuf::from("/opt/homebrew/lib/libpdfium.dylib")
+        );
+        assert_eq!(config.openai_base_url, "https://api.openai.com");
+        assert_eq!(config.mistral_base_url, "https://api.mistral.ai");
+    }
+
+    #[test]
+    fn test_builder_all_overrides() {
+        let config = Config::builder("sk-m", "sk-o")
+            .model("gpt-4o")
+            .vault_path("/v")
+            .papers_path("/p")
+            .pdfium_path("/lib/pdfium.so")
+            .openai_base_url("https://custom-openai.example.com")
+            .mistral_base_url("https://custom-mistral.example.com")
+            .build()
+            .unwrap();
+        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.vault_path, PathBuf::from("/v"));
+        assert_eq!(config.papers_path, PathBuf::from("/p"));
+        assert_eq!(config.pdfium_path, PathBuf::from("/lib/pdfium.so"));
+        assert_eq!(config.openai_base_url, "https://custom-openai.example.com");
+        assert_eq!(
+            config.mistral_base_url,
+            "https://custom-mistral.example.com"
+        );
+    }
+
+    #[test]
+    fn test_builder_rejects_empty_mistral_key() {
+        let result = Config::builder("", "sk-openai")
+            .vault_path("/v")
+            .build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+        assert!(err.to_string().contains("mistral_api_key"));
+    }
+
+    #[test]
+    fn test_builder_rejects_empty_openai_key() {
+        let result = Config::builder("sk-mistral", "")
+            .vault_path("/v")
+            .build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+        assert!(err.to_string().contains("openai_api_key"));
+    }
+
+    #[test]
+    fn test_validate_empty_keys() {
+        let config = Config {
+            mistral_api_key: String::new(),
+            openai_api_key: "sk-openai".into(),
+            model: "gpt-4o-mini".into(),
+            vault_path: PathBuf::from("/v"),
+            papers_path: PathBuf::from("/p"),
+            pdfium_path: PathBuf::from("/lib"),
+            openai_base_url: "https://api.openai.com".into(),
+            mistral_base_url: "https://api.mistral.ai".into(),
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("mistral_api_key"));
+
+        let config2 = Config {
+            mistral_api_key: "sk-mistral".into(),
+            openai_api_key: String::new(),
+            ..config
+        };
+        let err2 = config2.validate().unwrap_err();
+        assert!(err2.to_string().contains("openai_api_key"));
+    }
+
+    #[test]
+    fn test_debug_redacts_keys() {
+        let config = Config {
+            mistral_api_key: "super-secret-mistral-key".into(),
+            openai_api_key: "super-secret-openai-key".into(),
+            model: "gpt-4o-mini".into(),
+            vault_path: PathBuf::from("/vault"),
+            papers_path: PathBuf::from("/papers"),
+            pdfium_path: PathBuf::from("/lib/pdfium.dylib"),
+            openai_base_url: "https://api.openai.com".into(),
+            mistral_base_url: "https://api.mistral.ai".into(),
+        };
+        let debug_output = format!("{config:?}");
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("super-secret-mistral-key"));
+        assert!(!debug_output.contains("super-secret-openai-key"));
+    }
+
+    #[test]
+    fn test_debug_shows_non_sensitive_fields() {
+        let config = Config {
+            mistral_api_key: "sk-m".into(),
+            openai_api_key: "sk-o".into(),
+            model: "gpt-4o-mini".into(),
+            vault_path: PathBuf::from("/my/vault"),
+            papers_path: PathBuf::from("/my/papers"),
+            pdfium_path: PathBuf::from("/lib/pdfium.dylib"),
+            openai_base_url: "https://api.openai.com".into(),
+            mistral_base_url: "https://api.mistral.ai".into(),
+        };
+        let debug_output = format!("{config:?}");
+        assert!(debug_output.contains("gpt-4o-mini"));
+        assert!(debug_output.contains("/my/vault"));
+        assert!(debug_output.contains("/my/papers"));
+        assert!(debug_output.contains("api.openai.com"));
+        assert!(debug_output.contains("api.mistral.ai"));
     }
 }

@@ -1,0 +1,10 @@
+# GuardRails configuration — https://docs.guardrails.io
+#
+# Disable the hard-coded-secrets rule: this crate contains no real
+# credentials, and the rule false-positives on fake API-key fixtures
+# ("sk-mistral", "sk-openai", ...) used throughout the test suite.
+ruleOverride:
+  engineRules:
+    - engine: general
+      identifier: hard_coded_secrets
+      enable: false

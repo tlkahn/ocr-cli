@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::error::Result;
-use crate::progress::{Progress, Step, StderrProgress};
+use crate::progress::{Progress, StderrProgress, Step};
 
 /// Clap-free options for driving the pipeline from library code.
 #[derive(Debug, Clone, Default)]
@@ -37,6 +37,20 @@ pub struct ProcessResult {
     pub images_dir: Option<PathBuf>,
 }
 
+/// Outcome of processing a single file through the pipeline.
+#[derive(Debug)]
+pub enum ProcessOutcome {
+    /// dry_run=true: OCR was skipped; only the deduplicated title and
+    /// proposed output paths are returned.
+    DryRun {
+        title: String,
+        md_path: PathBuf,
+        pdf_path: PathBuf,
+    },
+    /// Normal processing completed; full result available.
+    Written(ProcessResult),
+}
+
 /// Build output paths from a title and config directories.
 ///
 /// Returns (markdown_path, pdf_path, images_dir):
@@ -54,14 +68,14 @@ pub fn output_paths(title: &str, vault: &Path, papers: &Path) -> (PathBuf, PathB
 /// `OnceLock<Pdfium>` so that both library and CLI callers can share one instance.
 pub(crate) enum PdfiumHandle<'a> {
     Borrowed(&'a lmpdf::Pdfium),
-    Lazy(&'a OnceLock<lmpdf::Pdfium>),
+    Lazy(OnceLock<lmpdf::Pdfium>),
 }
 
-impl<'a> PdfiumHandle<'a> {
-    pub(crate) fn get_or_init(&self, pdfium_path: &Path) -> Result<&'a lmpdf::Pdfium> {
+impl PdfiumHandle<'_> {
+    pub(crate) fn get_or_init(&self, pdfium_path: &Path) -> Result<&lmpdf::Pdfium> {
         match *self {
             PdfiumHandle::Borrowed(p) => Ok(p),
-            PdfiumHandle::Lazy(lock) => {
+            PdfiumHandle::Lazy(ref lock) => {
                 if lock.get().is_none() {
                     let p = lmpdf::Pdfium::open(pdfium_path)?;
                     let _ = lock.set(p);
@@ -107,11 +121,11 @@ pub(crate) async fn process_file_inner(
     page_text_fn: &dyn PageTextFn,
     pdfium: &PdfiumHandle<'_>,
     progress: &dyn Progress,
-) -> Result<Option<ProcessResult>> {
+) -> Result<ProcessOutcome> {
     let filename = input.file_name().unwrap_or_default().to_string_lossy();
 
     // Step 1: Truncate
-    progress.on_step(Step::Truncate, &filename);
+    progress.on_step(Step::Truncate, Some(&filename));
     let pdf_bytes = crate::truncate::truncate_pdf(
         input,
         options.lead,
@@ -121,7 +135,7 @@ pub(crate) async fn process_file_inner(
     )?;
 
     // Step 2: Extract title
-    progress.on_step(Step::ExtractTitle, "");
+    progress.on_step(Step::ExtractTitle, None);
     let page_text = page_text_fn.page_text(&pdf_bytes, pdfium, &config.pdfium_path)?;
     let title = crate::title::extract_title(
         &page_text,
@@ -135,11 +149,15 @@ pub(crate) async fn process_file_inner(
         let title = deduplicate_title(&title, &config.vault_path, &config.papers_path);
         let (md, pdf, _img) = output_paths(&title, &config.vault_path, &config.papers_path);
         progress.on_dry_run(&title, &md, &pdf);
-        return Ok(None);
+        return Ok(ProcessOutcome::DryRun {
+            title,
+            md_path: md,
+            pdf_path: pdf,
+        });
     }
 
     // Step 3: Mistral OCR
-    progress.on_step(Step::Ocr, "");
+    progress.on_step(Step::Ocr, None);
     let ocr_response = crate::ocr::ocr_pdf(
         client,
         &config.mistral_base_url,
@@ -150,14 +168,14 @@ pub(crate) async fn process_file_inner(
     .await?;
 
     // Step 4: Post-process
-    progress.on_step(Step::PostProcess, "");
+    progress.on_step(Step::PostProcess, None);
     let title = deduplicate_title(&title, &config.vault_path, &config.papers_path);
     let (md_path, pdf_path, images_dir) =
         output_paths(&title, &config.vault_path, &config.papers_path);
     let output = crate::postproc::postprocess(&ocr_response.pages, &images_dir, &title)?;
 
     // Step 5: Move outputs
-    progress.on_step(Step::WriteOutputs, "");
+    progress.on_step(Step::WriteOutputs, None);
     if let Some(parent) = md_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -177,7 +195,7 @@ pub(crate) async fn process_file_inner(
 
     let has_images = !output.saved_images.is_empty();
 
-    Ok(Some(ProcessResult {
+    Ok(ProcessOutcome::Written(ProcessResult {
         title,
         markdown_path: md_path,
         pdf_path,
@@ -187,8 +205,38 @@ pub(crate) async fn process_file_inner(
 
 /// Process a single PDF file through the full pipeline.
 ///
-/// Pass a pre-loaded `pdfium` instance to share it across calls, or `None`
-/// to let this function initialise one lazily.
+/// # Pdfium lifetime
+///
+/// Passing `None` for `pdfium` loads the pdfium dynamic library on **every
+/// call** (a fresh [`OnceLock`] is created inside this function each time).
+/// For callers processing multiple files this is wasteful -- open the library
+/// once and reuse it:
+///
+/// ```rust,no_run
+/// # use ocr_cli::config::{Config, ConfigOverrides};
+/// # use ocr_cli::pipeline::{Options, process_file};
+/// # use ocr_cli::progress::NoopProgress;
+/// # async fn run() -> ocr_cli::error::Result<()> {
+/// let config = Config::from_env(&ConfigOverrides::default())?;
+/// let client = reqwest::Client::new();
+/// let pdfium = lmpdf::Pdfium::open(&config.pdfium_path)?;
+///
+/// for path in &["a.pdf", "b.pdf"] {
+///     process_file(
+///         std::path::Path::new(path),
+///         &Options::default(),
+///         &config,
+///         &client,
+///         Some(&pdfium),
+///         &NoopProgress,
+///     ).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Alternatively, use [`process_batch`] which shares a single pdfium handle
+/// across all files internally.
 pub async fn process_file(
     input: &Path,
     options: &Options,
@@ -196,23 +244,35 @@ pub async fn process_file(
     client: &reqwest::Client,
     pdfium: Option<&lmpdf::Pdfium>,
     progress: &dyn Progress,
-) -> Result<Option<ProcessResult>> {
-    let lock = OnceLock::new();
+) -> Result<ProcessOutcome> {
     let handle = match pdfium {
         Some(p) => PdfiumHandle::Borrowed(p),
-        None => PdfiumHandle::Lazy(&lock),
+        None => PdfiumHandle::Lazy(OnceLock::new()),
     };
-    process_file_inner(input, options, config, client, &DefaultPageText, &handle, progress).await
+    process_file_inner(
+        input,
+        options,
+        config,
+        client,
+        &DefaultPageText,
+        &handle,
+        progress,
+    )
+    .await
 }
 
 /// Process all files in batch mode. Continues past individual failures.
 /// Returns a vec of (path, result) pairs.
-pub async fn process_batch(
-    cli: &Cli,
-    config: &Config,
-) -> Vec<(PathBuf, Result<Option<ProcessResult>>)> {
+pub async fn process_batch(cli: &Cli, config: &Config) -> Vec<(PathBuf, Result<ProcessOutcome>)> {
     let options = Options::from(cli);
-    process_batch_inner(&cli.files, &options, config, &DefaultPageText, &StderrProgress).await
+    process_batch_inner(
+        &cli.files,
+        &options,
+        config,
+        &DefaultPageText,
+        &StderrProgress,
+    )
+    .await
 }
 
 /// Testable batch processing with injectable page_text trait.
@@ -225,16 +285,22 @@ pub(crate) async fn process_batch_inner(
     config: &Config,
     page_text_fn: &dyn PageTextFn,
     progress: &dyn Progress,
-) -> Vec<(PathBuf, Result<Option<ProcessResult>>)> {
+) -> Vec<(PathBuf, Result<ProcessOutcome>)> {
     let client = reqwest::Client::new();
-    let pdfium = OnceLock::new();
-    let handle = PdfiumHandle::Lazy(&pdfium);
+    let handle = PdfiumHandle::Lazy(OnceLock::new());
     let mut results = Vec::new();
     for path in files {
         progress.on_file_start(path);
-        let result =
-            process_file_inner(path, options, config, &client, page_text_fn, &handle, progress)
-                .await;
+        let result = process_file_inner(
+            path,
+            options,
+            config,
+            &client,
+            page_text_fn,
+            &handle,
+            progress,
+        )
+        .await;
         if let Err(ref e) = result {
             progress.on_error(path, e);
         }
@@ -444,8 +510,7 @@ mod tests {
         };
         let client = reqwest::Client::new();
 
-        let pdfium = OnceLock::new();
-        let handle = PdfiumHandle::Lazy(&pdfium);
+        let handle = PdfiumHandle::Lazy(OnceLock::new());
         let result = process_file_inner(
             &input_pdf,
             &options,
@@ -461,7 +526,27 @@ mod tests {
             result.is_ok(),
             "process_file_inner should succeed: {result:?}"
         );
-        assert!(result.unwrap().is_none(), "dry-run should return Ok(None)");
+        let outcome = result.unwrap();
+        match outcome {
+            ProcessOutcome::DryRun {
+                title,
+                md_path,
+                pdf_path,
+            } => {
+                assert_eq!(title, "test-title-from-llm-smith-2024");
+                assert!(
+                    md_path
+                        .to_string_lossy()
+                        .contains("test-title-from-llm-smith-2024.md")
+                );
+                assert!(
+                    pdf_path
+                        .to_string_lossy()
+                        .contains("test-title-from-llm-smith-2024.pdf")
+                );
+            }
+            ProcessOutcome::Written(_) => panic!("expected DryRun, got Written"),
+        }
         // wiremock will verify OCR endpoint was never called on drop.
     }
 
@@ -572,8 +657,7 @@ mod tests {
         };
         let client = reqwest::Client::new();
 
-        let pdfium = OnceLock::new();
-        let handle = PdfiumHandle::Lazy(&pdfium);
+        let handle = PdfiumHandle::Lazy(OnceLock::new());
         let result = process_file_inner(
             &input_pdf,
             &options,
@@ -589,7 +673,10 @@ mod tests {
             result.is_ok(),
             "process_file_inner should succeed: {result:?}"
         );
-        let pr = result.unwrap().expect("should return Some(ProcessResult)");
+        let pr = match result.unwrap() {
+            ProcessOutcome::Written(pr) => pr,
+            ProcessOutcome::DryRun { .. } => panic!("expected Written, got DryRun"),
+        };
 
         // Title should be sanitized.
         assert_eq!(pr.title, "test-paper-doe-2023");
@@ -897,18 +984,16 @@ mod tests {
         assert_eq!(results.len(), 2, "should have results for both files");
 
         // Both should succeed.
-        let pr1 = results[0]
-            .1
-            .as_ref()
-            .expect("first file should succeed")
-            .as_ref()
-            .expect("first file should return Some");
-        let pr2 = results[1]
-            .1
-            .as_ref()
-            .expect("second file should succeed")
-            .as_ref()
-            .expect("second file should return Some");
+        let outcome1 = results[0].1.as_ref().expect("first file should succeed");
+        let pr1 = match outcome1 {
+            ProcessOutcome::Written(pr) => pr,
+            ProcessOutcome::DryRun { .. } => panic!("expected Written, got DryRun"),
+        };
+        let outcome2 = results[1].1.as_ref().expect("second file should succeed");
+        let pr2 = match outcome2 {
+            ProcessOutcome::Written(pr) => pr,
+            ProcessOutcome::DryRun { .. } => panic!("expected Written, got DryRun"),
+        };
 
         // They should have different titles.
         assert_eq!(pr1.title, "batch-test-paper-lee-etc-2022");
@@ -1005,6 +1090,31 @@ mod tests {
         assert_eq!(opts.lead, 0);
         assert_eq!(opts.trail, 0);
         assert!(!opts.dry_run);
+    }
+
+    #[test]
+    fn test_process_outcome_dry_run_is_debug() {
+        let outcome = ProcessOutcome::DryRun {
+            title: "foo".into(),
+            md_path: PathBuf::from("/vault/foo.md"),
+            pdf_path: PathBuf::from("/papers/foo.pdf"),
+        };
+        let dbg = format!("{outcome:?}");
+        assert!(dbg.contains("DryRun"));
+        assert!(dbg.contains("foo"));
+    }
+
+    #[test]
+    fn test_process_outcome_written_is_debug() {
+        let outcome = ProcessOutcome::Written(ProcessResult {
+            title: "bar".into(),
+            markdown_path: PathBuf::from("/vault/bar.md"),
+            pdf_path: PathBuf::from("/papers/bar.pdf"),
+            images_dir: None,
+        });
+        let dbg = format!("{outcome:?}");
+        assert!(dbg.contains("Written"));
+        assert!(dbg.contains("bar"));
     }
 
     #[test]

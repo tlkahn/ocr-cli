@@ -47,8 +47,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut &tmp, content).unwrap();
 
-        let pdfium = OnceLock::new();
-        let handle = PdfiumHandle::Lazy(&pdfium);
+        let handle = PdfiumHandle::Lazy(OnceLock::new());
         let dummy_pdfium = std::path::Path::new("/nonexistent/libpdfium.dylib");
         let result = truncate_pdf(tmp.path(), 0, 0, &handle, dummy_pdfium).unwrap();
         assert_eq!(result, content);

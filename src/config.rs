@@ -24,6 +24,16 @@ pub struct ConfigOverrides {
     pub model: Option<String>,
 }
 
+impl From<&Cli> for ConfigOverrides {
+    fn from(cli: &Cli) -> Self {
+        ConfigOverrides {
+            vault_path: cli.vault.clone(),
+            papers_path: cli.papers.clone(),
+            model: cli.model.clone(),
+        }
+    }
+}
+
 /// Default values for optional CLI flags.
 const DEFAULT_VAULT: &str = "~/Documents/Ekuro/";
 const DEFAULT_PAPERS: &str = "~/Documents/Papers/";
@@ -50,16 +60,7 @@ impl Config {
 
     /// Testable core: accepts a closure for env var lookups.
     fn resolve_with(cli: &Cli, env: impl Fn(&str) -> Option<String>) -> Result<Self> {
-        Self::resolve_inner(
-            cli.vault
-                .clone()
-                .map(|p| p.to_string_lossy().into_owned()),
-            cli.papers
-                .clone()
-                .map(|p| p.to_string_lossy().into_owned()),
-            cli.model.clone(),
-            env,
-        )
+        Self::from_env_with(&ConfigOverrides::from(cli), env)
     }
 
     fn from_env_with(
@@ -153,6 +154,16 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    /// Base env fixture: provides the three keys every happy-path test needs.
+    fn base_env(name: &str) -> Option<String> {
+        match name {
+            "MISTRAL_API_KEY" => Some("sk-mistral".into()),
+            "OPENAI_API_KEY" => Some("sk-openai".into()),
+            "HOME" => Some("/fakehome".into()),
+            _ => None,
+        }
+    }
+
     #[test]
     fn test_missing_mistral_key_returns_config_error() {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
@@ -190,10 +201,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "--vault", "/custom/vault", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_VAULT_PATH" => Some("/env/vault".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -205,10 +214,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_VAULT_PATH" => Some("/env/vault".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -218,15 +225,7 @@ mod tests {
     #[test]
     fn test_defaults_when_no_env_vars() {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
-        let env = |name: &str| -> Option<String> {
-            match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
-            }
-        };
-        let config = Config::resolve_with(&cli, env).unwrap();
+        let config = Config::resolve_with(&cli, base_env).unwrap();
         assert_eq!(config.model, "gpt-4o-mini");
         assert_eq!(
             config.vault_path,
@@ -247,15 +246,7 @@ mod tests {
     #[test]
     fn test_config_has_base_url_defaults() {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
-        let env = |name: &str| -> Option<String> {
-            match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
-            }
-        };
-        let config = Config::resolve_with(&cli, env).unwrap();
+        let config = Config::resolve_with(&cli, base_env).unwrap();
         assert_eq!(config.openai_base_url, "https://api.openai.com");
         assert_eq!(config.mistral_base_url, "https://api.mistral.ai");
     }
@@ -265,12 +256,9 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OPENAI_BASE_URL" => Some("https://custom-openai.example.com".into()),
                 "MISTRAL_BASE_URL" => Some("https://custom-mistral.example.com".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -286,11 +274,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "LLM_DEFAULT_MODEL" => Some("gpt-4o".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -302,11 +287,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "--model", "o3", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "LLM_DEFAULT_MODEL" => Some("gpt-4o".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -318,11 +300,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "PDFIUM_PATH" => Some("/custom/libpdfium.dylib".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -334,11 +313,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_PAPERS_PATH" => Some("/env/papers".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -351,11 +327,8 @@ mod tests {
             Cli::try_parse_from(["ocr-cli", "--papers", "/custom/papers", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_PAPERS_PATH" => Some("/env/papers".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -365,15 +338,7 @@ mod tests {
     #[test]
     fn test_cli_vault_tilde_expanded() {
         let cli = Cli::try_parse_from(["ocr-cli", "--vault", "~/my-vault", "test.pdf"]).unwrap();
-        let env = |name: &str| -> Option<String> {
-            match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
-            }
-        };
-        let config = Config::resolve_with(&cli, env).unwrap();
+        let config = Config::resolve_with(&cli, base_env).unwrap();
         assert_eq!(config.vault_path, PathBuf::from("/fakehome/my-vault"));
     }
 
@@ -382,11 +347,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_VAULT_PATH" => Some("~/env-vault".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -396,15 +358,7 @@ mod tests {
     #[test]
     fn test_cli_papers_tilde_expanded() {
         let cli = Cli::try_parse_from(["ocr-cli", "--papers", "~/my-papers", "test.pdf"]).unwrap();
-        let env = |name: &str| -> Option<String> {
-            match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
-            }
-        };
-        let config = Config::resolve_with(&cli, env).unwrap();
+        let config = Config::resolve_with(&cli, base_env).unwrap();
         assert_eq!(config.papers_path, PathBuf::from("/fakehome/my-papers"));
     }
 
@@ -413,11 +367,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_PAPERS_PATH" => Some("~/env-papers".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -473,11 +424,8 @@ mod tests {
             Cli::try_parse_from(["ocr-cli", "--vault", "~/Documents/Ekuro/", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_VAULT_PATH" => Some("/env/vault".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -493,11 +441,8 @@ mod tests {
             .unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "OCR_PAPERS_PATH" => Some("/env/papers".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -512,11 +457,8 @@ mod tests {
         let cli = Cli::try_parse_from(["ocr-cli", "--model", "gpt-4o-mini", "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
                 "LLM_DEFAULT_MODEL" => Some("gpt-4o".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
+                _ => base_env(name),
             }
         };
         let config = Config::resolve_with(&cli, env).unwrap();
@@ -544,15 +486,7 @@ mod tests {
 
     #[test]
     fn test_from_env_with_defaults() {
-        let env = |name: &str| -> Option<String> {
-            match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
-            }
-        };
-        let config = Config::from_env_with(&ConfigOverrides::default(), env).unwrap();
+        let config = Config::from_env_with(&ConfigOverrides::default(), base_env).unwrap();
         assert_eq!(config.model, "gpt-4o-mini");
         assert_eq!(
             config.vault_path,
@@ -566,20 +500,12 @@ mod tests {
 
     #[test]
     fn test_from_env_with_overrides() {
-        let env = |name: &str| -> Option<String> {
-            match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
-            }
-        };
         let overrides = ConfigOverrides {
             vault_path: Some(PathBuf::from("/custom/vault")),
             papers_path: Some(PathBuf::from("/custom/papers")),
             model: Some("gpt-4o".into()),
         };
-        let config = Config::from_env_with(&overrides, env).unwrap();
+        let config = Config::from_env_with(&overrides, base_env).unwrap();
         assert_eq!(config.vault_path, PathBuf::from("/custom/vault"));
         assert_eq!(config.papers_path, PathBuf::from("/custom/papers"));
         assert_eq!(config.model, "gpt-4o");
@@ -587,20 +513,12 @@ mod tests {
 
     #[test]
     fn test_from_env_overrides_with_tilde() {
-        let env = |name: &str| -> Option<String> {
-            match name {
-                "MISTRAL_API_KEY" => Some("sk-mistral".into()),
-                "OPENAI_API_KEY" => Some("sk-openai".into()),
-                "HOME" => Some("/fakehome".into()),
-                _ => None,
-            }
-        };
         let overrides = ConfigOverrides {
             vault_path: Some(PathBuf::from("~/my-vault")),
             papers_path: None,
             model: None,
         };
-        let config = Config::from_env_with(&overrides, env).unwrap();
+        let config = Config::from_env_with(&overrides, base_env).unwrap();
         assert_eq!(config.vault_path, PathBuf::from("/fakehome/my-vault"));
     }
 
@@ -614,14 +532,57 @@ mod tests {
         };
         let result = Config::from_env_with(&ConfigOverrides::default(), env);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("MISTRAL_API_KEY"));
+        assert!(result.unwrap_err().to_string().contains("MISTRAL_API_KEY"));
     }
 
     #[test]
     fn test_from_env_signature_exists() {
         let _: fn(&ConfigOverrides) -> Result<Config> = Config::from_env;
+    }
+
+    #[test]
+    fn test_config_overrides_from_cli() {
+        let cli = Cli::try_parse_from([
+            "ocr-cli",
+            "--vault",
+            "/my/vault",
+            "--papers",
+            "/my/papers",
+            "--model",
+            "o3",
+            "test.pdf",
+        ])
+        .unwrap();
+        let overrides = ConfigOverrides::from(&cli);
+        assert_eq!(overrides.vault_path, Some(PathBuf::from("/my/vault")));
+        assert_eq!(overrides.papers_path, Some(PathBuf::from("/my/papers")));
+        assert_eq!(overrides.model, Some("o3".into()));
+    }
+
+    #[test]
+    fn test_config_overrides_from_cli_defaults_are_none() {
+        let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
+        let overrides = ConfigOverrides::from(&cli);
+        assert!(overrides.vault_path.is_none());
+        assert!(overrides.papers_path.is_none());
+        assert!(overrides.model.is_none());
+    }
+
+    #[test]
+    fn test_resolve_with_matches_from_env_with_via_overrides() {
+        let cli = Cli::try_parse_from([
+            "ocr-cli", "--vault", "/v", "--papers", "/p", "--model", "m", "test.pdf",
+        ])
+        .unwrap();
+        let via_cli = Config::resolve_with(&cli, base_env).unwrap();
+        let via_overrides = Config::from_env_with(&ConfigOverrides::from(&cli), base_env).unwrap();
+        assert_eq!(via_cli.vault_path, via_overrides.vault_path);
+        assert_eq!(via_cli.papers_path, via_overrides.papers_path);
+        assert_eq!(via_cli.model, via_overrides.model);
+        assert_eq!(via_cli.mistral_api_key, via_overrides.mistral_api_key);
+        assert_eq!(via_cli.openai_api_key, via_overrides.openai_api_key);
+        assert_eq!(via_cli.pdfium_path, via_overrides.pdfium_path);
+        assert_eq!(via_cli.openai_base_url, via_overrides.openai_base_url);
+        assert_eq!(via_cli.mistral_base_url, via_overrides.mistral_base_url);
     }
 }

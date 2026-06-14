@@ -16,6 +16,7 @@ static RE_MD_IMAGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap());
 
 /// Result of post-processing a full OCR response.
+#[derive(Debug, Clone)]
 pub struct PostprocessedOutput {
     /// The combined markdown text (all pages joined with double newlines).
     pub markdown: String,

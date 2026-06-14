@@ -14,8 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 lmpdf = { git = "https://github.com/tlkahn/lmpdf.git", package = "lmpdf" }
-llm-core = { git = "https://github.com/tlkahn/llm-rs", package = "llm-core" }
-llm-openai = { git = "https://github.com/tlkahn/llm-rs", package = "llm-openai" }
+llm-core = { git = "https://github.com/tlkahn/llm-rs", package = "llm-core", rev = "665090e" }
+llm-openai = { git = "https://github.com/tlkahn/llm-rs", package = "llm-openai", rev = "665090e" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

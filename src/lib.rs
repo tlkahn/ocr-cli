@@ -61,9 +61,9 @@
 pub mod cli;
 pub mod config;
 pub mod error;
-pub(crate) mod ocr;
+pub mod ocr;
 pub mod pipeline;
-pub(crate) mod postproc;
+pub mod postproc;
 pub mod progress;
 pub(crate) mod title;
 pub(crate) mod truncate;

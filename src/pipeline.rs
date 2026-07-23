@@ -191,7 +191,12 @@ pub(crate) async fn process_file_inner(
     if let Some(parent) = pdf_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    move_file(input, &pdf_path)?;
+    if options.lead > 0 || options.trail > 0 {
+        std::fs::write(&pdf_path, &pdf_bytes)?;
+        std::fs::remove_file(input)?;
+    } else {
+        move_file(input, &pdf_path)?;
+    }
 
     let has_images = !output.saved_images.is_empty();
 
@@ -1218,5 +1223,222 @@ mod tests {
             }
             ProcessOutcome::Written(_) => panic!("expected DryRun"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_archived_pdf_matches_input_without_truncation() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        let title_body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "no-truncation-archive-test"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_json(&title_body),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let ocr_body = serde_json::json!({
+            "model": "mistral-ocr-latest",
+            "pages": [{ "index": 0, "markdown": "# Page", "images": [] }],
+            "usage_info": { "pages_processed": 1 }
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/ocr"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_json(&ocr_body),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_pdf = tmp.path().join("input.pdf");
+        let original_content = b"%PDF-original-content-should-be-preserved";
+        std::fs::write(&input_pdf, original_content).unwrap();
+        let vault = tmp.path().join("vault");
+        let papers = tmp.path().join("papers");
+
+        let options = Options {
+            lead: 0,
+            trail: 0,
+            dry_run: false,
+        };
+        let config = crate::config::Config {
+            mistral_api_key: "sk-test".into(),
+            openai_api_key: "sk-test".into(),
+            model: "gpt-4o-mini".into(),
+            vault_path: vault,
+            papers_path: papers,
+            pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
+            openai_base_url: mock_server.uri(),
+            mistral_base_url: mock_server.uri(),
+        };
+        let client = reqwest::Client::new();
+        let handle = PdfiumHandle::Lazy(OnceLock::new());
+
+        let result = process_file_inner(
+            &input_pdf,
+            &options,
+            &config,
+            &client,
+            &MockPageText,
+            &handle,
+            &NoopProgress,
+        )
+        .await
+        .unwrap();
+
+        let pr = match result {
+            ProcessOutcome::Written(pr) => pr,
+            ProcessOutcome::DryRun { .. } => panic!("expected Written"),
+        };
+
+        assert!(!input_pdf.exists(), "original should be removed");
+        let archived = std::fs::read(&pr.pdf_path).unwrap();
+        assert_eq!(
+            archived, original_content,
+            "archived PDF should match original when no truncation"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_archived_pdf_is_truncated_when_lead_trail_set() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let pp = std::path::PathBuf::from(
+            std::env::var("PDFIUM_PATH").expect("Set PDFIUM_PATH to run Pdfium tests"),
+        );
+        let pdfium_inst = lmpdf::Pdfium::open(&pp).unwrap();
+
+        let sample = Path::new("tests/fixtures/sample-5page.pdf");
+        let original_pages = {
+            let doc = pdfium_inst.open_document(sample, None).unwrap();
+            doc.page_count()
+        };
+        assert!(
+            original_pages >= 3,
+            "need >= 3 pages for lead=1,trail=1 test, got {original_pages}"
+        );
+
+        let mock_server = MockServer::start().await;
+
+        let title_body = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "truncation-archive-test"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_json(&title_body),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let ocr_body = serde_json::json!({
+            "model": "mistral-ocr-latest",
+            "pages": [{ "index": 0, "markdown": "# Truncated", "images": [] }],
+            "usage_info": { "pages_processed": 1 }
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/ocr"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_json(&ocr_body),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_pdf = tmp.path().join("sample.pdf");
+        std::fs::copy(sample, &input_pdf).unwrap();
+        let vault = tmp.path().join("vault");
+        let papers = tmp.path().join("papers");
+
+        let options = Options {
+            lead: 1,
+            trail: 1,
+            dry_run: false,
+        };
+        let config = crate::config::Config {
+            mistral_api_key: "sk-test".into(),
+            openai_api_key: "sk-test".into(),
+            model: "gpt-4o-mini".into(),
+            vault_path: vault,
+            papers_path: papers,
+            pdfium_path: pp.clone(),
+            openai_base_url: mock_server.uri(),
+            mistral_base_url: mock_server.uri(),
+        };
+        let client = reqwest::Client::new();
+        let handle = PdfiumHandle::Borrowed(&pdfium_inst);
+
+        let result = process_file_inner(
+            &input_pdf,
+            &options,
+            &config,
+            &client,
+            &MockPageText,
+            &handle,
+            &NoopProgress,
+        )
+        .await
+        .unwrap();
+
+        let pr = match result {
+            ProcessOutcome::Written(pr) => pr,
+            ProcessOutcome::DryRun { .. } => panic!("expected Written"),
+        };
+
+        assert!(!input_pdf.exists(), "original should be removed");
+        assert!(pr.pdf_path.exists(), "archived PDF should exist");
+
+        let archived_bytes = std::fs::read(&pr.pdf_path).unwrap();
+        let archived_doc = pdfium_inst.load_document(&archived_bytes, None).unwrap();
+        assert_eq!(
+            archived_doc.page_count(),
+            original_pages - 2,
+            "archived PDF should have lead+trail pages removed (expected {}, got {})",
+            original_pages - 2,
+            archived_doc.page_count()
+        );
     }
 }

@@ -31,7 +31,7 @@ ocr-cli *.pdf --dry-run
 | `--trail N` | `0` | Pages to remove from the end |
 | `--vault PATH` | `~/Documents/Ekuro/` | Output directory for markdown notes |
 | `--papers PATH` | `~/Documents/Papers/` | Archive directory for source PDFs |
-| `--model MODEL` | `gpt-4o-mini` | LLM model for title extraction |
+| `--model MODEL` | `gpt-5-nano` | LLM model for title extraction |
 | `--dry-run` | off | Stop after title extraction, print proposed filename |
 
 ## Requirements

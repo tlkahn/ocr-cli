@@ -447,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dry_run_stops_after_title() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{body_partial_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
@@ -456,7 +456,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -474,6 +474,9 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": "gpt-5-nano" }),
+            ))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("Content-Type", "application/json")
@@ -506,7 +509,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-5-nano".into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -581,7 +584,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -653,7 +656,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-5-nano".into(),
             vault_path: vault.clone(),
             papers_path: papers.clone(),
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -731,7 +734,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -778,7 +781,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-5-nano".into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -910,7 +913,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -975,7 +978,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-5-nano".into(),
             vault_path: vault.clone(),
             papers_path: papers.clone(),
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -1149,7 +1152,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -1189,14 +1192,15 @@ mod tests {
         let vault = tmp.path().join("vault");
         let papers = tmp.path().join("papers");
 
-        let config = crate::config::Config::builder("sk-mistral-from-builder", "sk-openai-from-builder")
-            .vault_path(&vault)
-            .papers_path(&papers)
-            .pdfium_path("/nonexistent/libpdfium.dylib")
-            .openai_base_url(mock_server.uri())
-            .mistral_base_url(mock_server.uri())
-            .build()
-            .unwrap();
+        let config =
+            crate::config::Config::builder("sk-mistral-from-builder", "sk-openai-from-builder")
+                .vault_path(&vault)
+                .papers_path(&papers)
+                .pdfium_path("/nonexistent/libpdfium.dylib")
+                .openai_base_url(mock_server.uri())
+                .mistral_base_url(mock_server.uri())
+                .build()
+                .unwrap();
 
         let options = Options {
             lead: 0,
@@ -1216,7 +1220,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "builder-constructed config should work: {result:?}");
+        assert!(
+            result.is_ok(),
+            "builder-constructed config should work: {result:?}"
+        );
         match result.unwrap() {
             ProcessOutcome::DryRun { title, .. } => {
                 assert_eq!(title, "builder-pipeline-test-2024");
@@ -1235,7 +1242,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -1288,7 +1295,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-test".into(),
             openai_api_key: "sk-test".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-5-nano".into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -1349,7 +1356,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -1401,7 +1408,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-test".into(),
             openai_api_key: "sk-test".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-5-nano".into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: pp.clone(),

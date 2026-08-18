@@ -148,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_title_returns_sanitized_title() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{body_partial_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
@@ -156,7 +156,7 @@ mod tests {
         let body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-4o-mini",
+            "model": "gpt-5-nano",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -174,6 +174,9 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
+            .and(body_partial_json(
+                serde_json::json!({ "model": "gpt-5-nano" }),
+            ))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("Content-Type", "application/json")
@@ -185,7 +188,7 @@ mod tests {
 
         let result = extract_title(
             "some page text...",
-            "gpt-4o-mini",
+            "gpt-5-nano",
             "sk-test",
             &mock_server.uri(),
         )
@@ -220,7 +223,7 @@ mod tests {
 
         let result = extract_title(
             "some page text...",
-            "gpt-4o-mini",
+            "gpt-5-nano",
             "bad-key",
             &mock_server.uri(),
         )

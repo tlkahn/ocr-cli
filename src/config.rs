@@ -69,7 +69,7 @@ impl From<&Cli> for ConfigOverrides {
 /// Default values for optional CLI flags.
 const DEFAULT_VAULT: &str = "~/Documents/Ekuro/";
 const DEFAULT_PAPERS: &str = "~/Documents/Papers/";
-const DEFAULT_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_MODEL: &str = "gpt-5-nano";
 const DEFAULT_PDFIUM_PATH: &str = "/opt/homebrew/lib/libpdfium.dylib";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai";
@@ -77,11 +77,7 @@ const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai";
 /// Return `None` when the string is empty or contains only whitespace,
 /// otherwise return `Some(s)` unchanged.
 fn non_blank(s: String) -> Option<String> {
-    if s.trim().is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.trim().is_empty() { None } else { Some(s) }
 }
 
 /// Return `None` when the path is empty (its `OsStr` is empty),
@@ -358,10 +354,7 @@ impl ConfigBuilder {
             papers_path,
             pdfium_path: self
                 .pdfium_path
-                .or_else(|| {
-                    env_non_empty(&env, "PDFIUM_PATH")
-                        .map(PathBuf::from)
-                })
+                .or_else(|| env_non_empty(&env, "PDFIUM_PATH").map(PathBuf::from))
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_PDFIUM_PATH)),
             openai_base_url: self
                 .openai_base_url
@@ -480,12 +473,19 @@ mod tests {
             config.papers_path,
             PathBuf::from("/fakehome/Documents/Papers/")
         );
-        assert_eq!(
-            config.pdfium_path,
-            PathBuf::from(DEFAULT_PDFIUM_PATH)
-        );
+        assert_eq!(config.pdfium_path, PathBuf::from(DEFAULT_PDFIUM_PATH));
         assert_eq!(config.openai_base_url, DEFAULT_OPENAI_BASE_URL);
         assert_eq!(config.mistral_base_url, DEFAULT_MISTRAL_BASE_URL);
+    }
+
+    #[test]
+    fn test_default_model_is_gpt_5_nano() {
+        // Product contract for issue #11: pin the literal, not only DEFAULT_MODEL.
+        assert_eq!(DEFAULT_MODEL, "gpt-5-nano");
+
+        let cli = Cli::try_parse_from(["ocr-cli", "test.pdf"]).unwrap();
+        let config = Config::resolve_with(&cli, base_env).unwrap();
+        assert_eq!(config.model, "gpt-5-nano");
     }
 
     #[test]
@@ -699,8 +699,7 @@ mod tests {
 
     #[test]
     fn test_cli_model_equal_to_default_overrides_env() {
-        let cli =
-            Cli::try_parse_from(["ocr-cli", "--model", DEFAULT_MODEL, "test.pdf"]).unwrap();
+        let cli = Cli::try_parse_from(["ocr-cli", "--model", DEFAULT_MODEL, "test.pdf"]).unwrap();
         let env = |name: &str| -> Option<String> {
             match name {
                 "LLM_DEFAULT_MODEL" => Some("gpt-4o".into()),
@@ -846,10 +845,7 @@ mod tests {
         assert_eq!(config.model, DEFAULT_MODEL);
         assert_eq!(config.vault_path, PathBuf::from("/explicit/vault"));
         assert_eq!(config.papers_path, PathBuf::from("/explicit/papers"));
-        assert_eq!(
-            config.pdfium_path,
-            PathBuf::from(DEFAULT_PDFIUM_PATH)
-        );
+        assert_eq!(config.pdfium_path, PathBuf::from(DEFAULT_PDFIUM_PATH));
         assert_eq!(config.openai_base_url, DEFAULT_OPENAI_BASE_URL);
         assert_eq!(config.mistral_base_url, DEFAULT_MISTRAL_BASE_URL);
     }
@@ -878,9 +874,7 @@ mod tests {
 
     #[test]
     fn test_builder_rejects_empty_mistral_key() {
-        let result = Config::builder("", "sk-openai")
-            .vault_path("/v")
-            .build();
+        let result = Config::builder("", "sk-openai").vault_path("/v").build();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, Error::Config(_)));
@@ -889,9 +883,7 @@ mod tests {
 
     #[test]
     fn test_builder_rejects_empty_openai_key() {
-        let result = Config::builder("sk-mistral", "")
-            .vault_path("/v")
-            .build();
+        let result = Config::builder("sk-mistral", "").vault_path("/v").build();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, Error::Config(_)));
@@ -1099,9 +1091,7 @@ mod tests {
 
     #[test]
     fn test_builder_rejects_whitespace_only_mistral_key() {
-        let result = Config::builder("   ", "sk-openai")
-            .vault_path("/v")
-            .build();
+        let result = Config::builder("   ", "sk-openai").vault_path("/v").build();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, Error::Config(_)));
@@ -1146,13 +1136,8 @@ mod tests {
             .papers_path("/p")
             .build()
             .unwrap();
-        let via_env = Config::resolve_inner(
-            Some("/v".into()),
-            Some("/p".into()),
-            None,
-            base_env,
-        )
-        .unwrap();
+        let via_env =
+            Config::resolve_inner(Some("/v".into()), Some("/p".into()), None, base_env).unwrap();
         assert_eq!(
             via_builder.pdfium_path, via_env.pdfium_path,
             "builder and resolve_inner must agree on the default pdfium_path ({})",
@@ -1170,13 +1155,8 @@ mod tests {
             .papers_path("/p")
             .build()
             .unwrap();
-        let via_env = Config::resolve_inner(
-            Some("/v".into()),
-            Some("/p".into()),
-            None,
-            base_env,
-        )
-        .unwrap();
+        let via_env =
+            Config::resolve_inner(Some("/v".into()), Some("/p".into()), None, base_env).unwrap();
         assert_eq!(
             via_builder.openai_base_url, via_env.openai_base_url,
             "builder and resolve_inner must agree on the default openai_base_url ({})",
@@ -1201,7 +1181,10 @@ mod tests {
             Some("   ".into()), // whitespace-only model override
             base_env,
         );
-        assert!(result.is_err(), "resolve_inner must reject whitespace-only model via validate()");
+        assert!(
+            result.is_err(),
+            "resolve_inner must reject whitespace-only model via validate()"
+        );
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("model"),

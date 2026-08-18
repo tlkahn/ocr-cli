@@ -25,7 +25,7 @@ pub struct Cli {
     #[arg(long)]
     pub papers: Option<PathBuf>,
 
-    /// LLM model for title extraction [default: gpt-4o-mini]
+    /// LLM model for title extraction [default: gpt-5-nano]
     #[arg(long)]
     pub model: Option<String>,
 
@@ -95,5 +95,22 @@ mod tests {
     fn test_verbose_flag_rejected() {
         let result = Cli::try_parse_from(["ocr-cli", "--verbose", "paper.pdf"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_model_flag_help_lists_gpt_5_nano_default() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+        assert!(
+            help.contains("gpt-5-nano"),
+            "expected --model help to mention default gpt-5-nano, got:\n{help}"
+        );
+        assert!(
+            !help.contains("gpt-4o-mini"),
+            "stale default gpt-4o-mini still present in help:\n{help}"
+        );
     }
 }

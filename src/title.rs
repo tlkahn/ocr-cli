@@ -73,9 +73,7 @@ pub async fn extract_title(
     base_url: &str,
 ) -> crate::error::Result<String> {
     let provider = OpenAiProvider::new(base_url);
-    let prompt = Prompt::new(page_text)
-        .with_system(TITLE_SYSTEM_PROMPT)
-        .with_option("temperature", serde_json::json!(0));
+    let prompt = Prompt::new(page_text).with_system(TITLE_SYSTEM_PROMPT);
 
     let stream = provider
         .execute(model, &prompt, Some(api_key), false)

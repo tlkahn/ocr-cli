@@ -96,6 +96,8 @@ pub async fn extract_title(
 mod tests {
     use super::*;
 
+    const TEST_DEFAULT_MODEL: &str = "gpt-5-nano";
+
     #[test]
     fn test_sanitize_strips_quotes() {
         assert_eq!(
@@ -156,7 +158,7 @@ mod tests {
         let body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -175,7 +177,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .and(body_partial_json(
-                serde_json::json!({ "model": "gpt-5-nano" }),
+                serde_json::json!({ "model": TEST_DEFAULT_MODEL }),
             ))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -188,7 +190,7 @@ mod tests {
 
         let result = extract_title(
             "some page text...",
-            "gpt-5-nano",
+            TEST_DEFAULT_MODEL,
             "sk-test",
             &mock_server.uri(),
         )
@@ -223,7 +225,7 @@ mod tests {
 
         let result = extract_title(
             "some page text...",
-            "gpt-5-nano",
+            TEST_DEFAULT_MODEL,
             "bad-key",
             &mock_server.uri(),
         )

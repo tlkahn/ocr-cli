@@ -363,6 +363,8 @@ mod tests {
     use super::*;
     use crate::progress::NoopProgress;
 
+    const TEST_DEFAULT_MODEL: &str = "gpt-5-nano";
+
     #[test]
     fn test_move_file_same_device() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -456,7 +458,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -475,7 +477,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .and(body_partial_json(
-                serde_json::json!({ "model": "gpt-5-nano" }),
+                serde_json::json!({ "model": TEST_DEFAULT_MODEL }),
             ))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -509,7 +511,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-5-nano".into(),
+            model: TEST_DEFAULT_MODEL.into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -584,7 +586,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -656,7 +658,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-5-nano".into(),
+            model: TEST_DEFAULT_MODEL.into(),
             vault_path: vault.clone(),
             papers_path: papers.clone(),
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -734,7 +736,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -781,7 +783,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-5-nano".into(),
+            model: TEST_DEFAULT_MODEL.into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -913,7 +915,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -978,7 +980,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-mistral-test".into(),
             openai_api_key: "sk-openai-test".into(),
-            model: "gpt-5-nano".into(),
+            model: TEST_DEFAULT_MODEL.into(),
             vault_path: vault.clone(),
             papers_path: papers.clone(),
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -1152,7 +1154,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -1170,7 +1172,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .and(body_partial_json(serde_json::json!({ "model": "gpt-5-nano" })))
+            .and(body_partial_json(serde_json::json!({ "model": TEST_DEFAULT_MODEL })))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("Content-Type", "application/json")
@@ -1243,7 +1245,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -1296,7 +1298,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-test".into(),
             openai_api_key: "sk-test".into(),
-            model: "gpt-5-nano".into(),
+            model: TEST_DEFAULT_MODEL.into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: PathBuf::from("/nonexistent/libpdfium.dylib"),
@@ -1357,7 +1359,7 @@ mod tests {
         let title_body = serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
-            "model": "gpt-5-nano",
+            "model": TEST_DEFAULT_MODEL,
             "choices": [{
                 "index": 0,
                 "message": {
@@ -1409,7 +1411,7 @@ mod tests {
         let config = crate::config::Config {
             mistral_api_key: "sk-test".into(),
             openai_api_key: "sk-test".into(),
-            model: "gpt-5-nano".into(),
+            model: TEST_DEFAULT_MODEL.into(),
             vault_path: vault,
             papers_path: papers,
             pdfium_path: pp.clone(),

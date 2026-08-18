@@ -100,17 +100,26 @@ mod tests {
     #[test]
     fn test_model_flag_help_lists_gpt_5_nano_default() {
         use clap::CommandFactory;
-        let mut cmd = Cli::command();
-        let mut help = Vec::new();
-        cmd.write_long_help(&mut help).unwrap();
-        let help = String::from_utf8(help).unwrap();
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_long() == Some("model"))
+            .expect("Cli must expose --model");
+        let mut help = String::new();
+        if let Some(h) = arg.get_help() {
+            help.push_str(&h.to_string());
+            help.push(' ');
+        }
+        if let Some(h) = arg.get_long_help() {
+            help.push_str(&h.to_string());
+        }
         assert!(
             help.contains("gpt-5-nano"),
-            "expected --model help to mention default gpt-5-nano, got:\n{help}"
+            "expected --model help to mention default gpt-5-nano, got: {help:?}"
         );
         assert!(
             !help.contains("gpt-4o-mini"),
-            "stale default gpt-4o-mini still present in help:\n{help}"
+            "stale default gpt-4o-mini still present in --model help: {help:?}"
         );
     }
 }

@@ -851,6 +851,17 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_default_model_is_gpt_5_nano() {
+        // Product contract: builder path pins the same literal as resolve path.
+        let config = Config::builder("sk-mistral", "sk-openai")
+            .vault_path("/v")
+            .papers_path("/p")
+            .build()
+            .unwrap();
+        assert_eq!(config.model, "gpt-5-nano");
+    }
+
+    #[test]
     fn test_builder_all_overrides() {
         let config = Config::builder("sk-m", "sk-o")
             .model("gpt-4o")

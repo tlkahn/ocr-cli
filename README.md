@@ -34,6 +34,10 @@ ocr-cli *.pdf --dry-run
 | `--model MODEL` | `gpt-5-nano` | LLM model for title extraction |
 | `--dry-run` | off | Stop after title extraction, print proposed filename |
 
+Default model is `gpt-5-nano` when neither `--model` nor `LLM_DEFAULT_MODEL`
+is set. The previous default was `gpt-4o-mini`; restore it with
+`--model gpt-4o-mini` or `LLM_DEFAULT_MODEL=gpt-4o-mini`.
+
 ## Requirements
 
 - [Pdfium](https://pdfium.googlesource.com/pdfium/) shared library (searched at `/opt/homebrew/lib/libpdfium.dylib` or via `PDFIUM_PATH`)

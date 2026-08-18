@@ -1172,7 +1172,9 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
-            .and(body_partial_json(serde_json::json!({ "model": TEST_DEFAULT_MODEL })))
+            .and(body_partial_json(
+                serde_json::json!({ "model": TEST_DEFAULT_MODEL }),
+            ))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("Content-Type", "application/json")

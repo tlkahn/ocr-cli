@@ -1144,7 +1144,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builder_config_drives_pipeline() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{body_partial_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
@@ -1170,6 +1170,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({ "model": "gpt-5-nano" })))
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("Content-Type", "application/json")
